@@ -37,9 +37,12 @@ const DEFAULTS = {
   showResources: true,
   searchTerms: "-ERR-",
 };
+
 const STATUS_GROUPS = ["200", "30x", "40x", "50x"];
+
 const asText = (v) =>
   v == null ? "" : typeof v === "string" ? v : JSON.stringify(v, null, 2);
+
 async function copyText(text) {
   if (navigator.clipboard?.writeText) {
     try {
@@ -65,10 +68,12 @@ async function copyText(text) {
   }
   if (!copied) throw new Error("Clipboard access is unavailable.");
 }
+
 const getHeader = (headers, name) =>
   (headers || []).find(
     (h) => (h.name || "").toLowerCase() === name.toLowerCase(),
   )?.value || "";
+
 const isResource = (e) => {
   const mime = (
     e.response?.content?.mimeType ||
@@ -89,6 +94,7 @@ const isResource = (e) => {
   if (/json/.test(mime) || ext === "json") return "JSON";
   return "Other";
 };
+
 function parseHar(raw) {
   const har = typeof raw === "string" ? JSON.parse(raw) : raw;
   const entries = har?.log?.entries;
@@ -108,6 +114,7 @@ function parseHar(raw) {
     _time: Number(e.time || 0),
   }));
 }
+
 function statusGroup(code) {
   if (code >= 200 && code < 300) return "200";
   if (code >= 300 && code < 400) return "30x";
@@ -115,33 +122,41 @@ function statusGroup(code) {
   if (code >= 500 && code < 600) return "50x";
   return "other";
 }
+
 function App() {
-  const [settings, setSettings] = useState(DEFAULTS),
-    [entries, setEntries] = useState([]),
-    [fileName, setFileName] = useState(""),
-    [error, setError] = useState("");
-  const [tab, setTab] = useState(0),
-    [selectedId, setSelectedId] = useState(null),
-    [filter, setFilter] = useState("all"),
-    [query, setQuery] = useState("");
-  const [settingsOpen, setSettingsOpen] = useState(false),
-    [saved, setSaved] = useState(false);
+  const [settings, setSettings] = useState(DEFAULTS);
+  const [entries, setEntries] = useState([]);
+  const [fileName, setFileName] = useState("");
+  const [error, setError] = useState("");
+
+  const [tab, setTab] = useState(0);
+  const [selectedId, setSelectedId] = useState(null);
+  const [filter, setFilter] = useState("all");
+  const [query, setQuery] = useState("");
+  const [resourceQuery, setResourceQuery] = useState("");
+
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [saved, setSaved] = useState(false);
+
   useEffect(() => {
     if (globalThis.chrome?.storage?.local)
       chrome.storage.local.get("harSettings", (r) =>
         setSettings({ ...DEFAULTS, ...(r.harSettings || {}) }),
       );
   }, []);
+
   const updateSetting = (key, value) => {
     const next = { ...settings, [key]: value };
     setSettings(next);
     setSaved(false);
   };
+
   const saveSettings = () => {
     if (globalThis.chrome?.storage?.local)
       chrome.storage.local.set({ harSettings: settings }, () => setSaved(true));
     else setSaved(true);
   };
+
   const onFile = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -154,16 +169,19 @@ function App() {
       setTab(0);
       setFilter("all");
       setQuery("");
+      setResourceQuery("");
     } catch (err) {
       setError(err.message || "Unable to parse this HAR file.");
       setEntries([]);
     }
     e.target.value = "";
   };
+
   const terms = (settings.searchTerms || "")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
+
   const visibleEntries = useMemo(
     () =>
       entries.filter((e) => {
@@ -201,28 +219,42 @@ function App() {
           return false;
         if (
           query &&
+          tab !== 2 &&
           !`${e._url} ${e._method} ${e._status} ${e._resource}`
             .toLowerCase()
             .includes(query.toLowerCase())
         )
           return false;
+        if (
+          tab === 2 &&
+          resourceQuery &&
+          !`${e._url} ${e._method} ${e._status} ${e._resource}`
+            .toLowerCase()
+            .includes(resourceQuery.toLowerCase())
+        )
+          return false;
         return true;
       }),
-    [entries, settings, filter, query, tab],
+    [entries, settings, filter, query, resourceQuery, tab],
   );
+
   const selected = entries.find((e) => e._id === selectedId);
   const count = (group) =>
     entries.filter((e) => statusGroup(e._status) === group).length;
+
   const resourceSuccess = entries.filter(
     (e) => e._resource !== "Other" && e._status >= 200 && e._status < 400,
   ).length;
   const resourceFailure = entries.filter(
     (e) => e._resource !== "Other" && (e._status >= 400 || e._status === 0),
   ).length;
+
   const matches = entries.filter((e) =>
     terms.some((t) => (e._body || "").toLowerCase().includes(t.toLowerCase())),
   );
+
   const fmt = (n) => `${Number(n || 0).toFixed(1)} ms`;
+
   return (
     <div className="app">
       <AppBar position="static" className="topbar">
@@ -376,6 +408,7 @@ function App() {
                   setEntries([]);
                   setFileName("");
                   setSelectedId(null);
+                  setResourceQuery("");
                 }}
               >
                 Clear file
@@ -470,13 +503,37 @@ function App() {
               </Tabs>
               <Divider />
               <div className="filterbar">
-                <TextField
-                  size="small"
-                  variant="outlined"
-                  placeholder="Search URL, method, status..."
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                />
+                {tab === 2 ? (
+                  <>
+                    <TextField
+                      size="small"
+                      variant="outlined"
+                      placeholder="Search resources by URL, method, status, or type..."
+                      inputProps={{
+                        "aria-label":
+                          "Search resources by URL, method, status, or type",
+                      }}
+                      value={resourceQuery}
+                      onChange={(e) => setResourceQuery(e.target.value)}
+                    />
+                    <Button
+                      size="small"
+                      aria-label="Clear resource search"
+                      disabled={!resourceQuery}
+                      onClick={() => setResourceQuery("")}
+                    >
+                      Clear
+                    </Button>
+                  </>
+                ) : (
+                  <TextField
+                    size="small"
+                    variant="outlined"
+                    placeholder="Search URL, method, status..."
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                  />
+                )}
                 <FormControl
                   variant="outlined"
                   size="small"
@@ -665,6 +722,7 @@ function App() {
     </div>
   );
 }
+
 function Payload({ title, value }) {
   const [expanded, setExpanded] = useState(false);
   const [copyStatus, setCopyStatus] = useState("");
