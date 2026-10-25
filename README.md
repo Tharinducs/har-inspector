@@ -14,6 +14,7 @@ A React + Webpack 5 + Chrome Manifest V3 extension that opens a full dashboard i
 - Select a request to inspect request/response body, request/response headers, status, resource type, total duration, and HAR timing breakdown (blocked, DNS, connect, send, wait, receive, SSL).
 - Separates JavaScript, image, and JSON resource loading and offers successful/failed resource filters.
 - Settings for each status group, resource-loading visibility, and comma-separated body search terms. Default search term: `-ERR-`.
+- Upload history is enabled by default and can be turned off in Settings. It keeps HAR file contents, filenames, and upload timestamps in Chrome session storage. Select an item from History to reopen its analysis; turning history off deletes saved entries, and session history is cleared when the browser session ends.
 - Settings are saved using `chrome.storage.local`.
 - No backend or network upload. The HAR is parsed in the extension tab.
 - Uses `@material-ui/core` v4 and `@material-ui/icons` dependency (not MUI v5), React 17, Webpack 5; no Vite.
@@ -49,5 +50,6 @@ In Chrome DevTools, open **Network**, reproduce the issue, right-click the reque
 - Resource types are inferred from HAR MIME types and URL extensions. Unrecognized resource types are shown as `Other`.
 - Total response time uses the HAR `entry.time` value; detailed timing fields are shown as recorded, including `-1` when the browser reports a timing value as unavailable.
 - Body search is case-insensitive and scans response-body text included in the HAR. For large HAR files, the browser may need a little time and memory to parse and render all requests.
+- Session storage has a browser-enforced quota. If a HAR cannot be added to history, the analysis still opens and the dashboard displays a storage error.
 
 The `npm run build` script copies `manifest.json` and `background.js` into `dist` automatically, so the generated `dist` folder is ready to load unpacked.

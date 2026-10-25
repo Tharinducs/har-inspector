@@ -99,6 +99,50 @@ body {
   margin: 0 auto;
   padding: 30px 28px 18px;
 }
+.main.history-mode > :not(.history-section) {
+  display: none;
+}
+.history-section > .MuiTypography-h4 {
+  margin-bottom: 18px;
+  color: #20265f;
+  font-weight: 800;
+}
+.history-list {
+  padding: 0 !important;
+  overflow: hidden;
+}
+.history-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  padding: 18px 21px;
+  border: 0;
+  background: #fff;
+  color: #24344e;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+.history-item + .history-item {
+  border-top: 1px solid #eef1f8;
+}
+.history-item:hover {
+  background: #f7f7ff;
+}
+.history-file-name {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.history-item time {
+  flex-shrink: 0;
+  color: #718096;
+  font-size: 13px;
+}
 .intro {
   display: flex;
   align-items: center;
@@ -595,6 +639,15 @@ footer {
   }
   .main {
     padding: 18px 12px;
+  }
+  .history-item {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 5px;
+    padding: 15px;
+  }
+  .history-file-name {
+    max-width: 100%;
   }
   .intro {
     align-items: flex-start;

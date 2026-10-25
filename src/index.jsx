@@ -35,13 +35,75 @@ const DEFAULTS = {
   show40x: true,
   show50x: true,
   showResources: true,
+  historyEnabled: true,
   searchTerms: "-ERR-",
 };
 
 const STATUS_GROUPS = ["200", "30x", "40x", "50x"];
+const HISTORY_KEY = "harHistory";
 
 const asText = (v) =>
   v == null ? "" : typeof v === "string" ? v : JSON.stringify(v, null, 2);
+
+function getSessionHistory() {
+  return new Promise((resolve, reject) => {
+    const storage = globalThis.chrome?.storage?.session;
+    if (!storage) {
+      reject(new Error("Chrome session storage is unavailable."));
+      return;
+    }
+
+    storage.get(HISTORY_KEY, (result) => {
+      const storageError = globalThis.chrome?.runtime?.lastError;
+      if (storageError) {
+        reject(new Error(storageError.message));
+        return;
+      }
+
+      resolve(Array.isArray(result[HISTORY_KEY]) ? result[HISTORY_KEY] : []);
+    });
+  });
+}
+
+function saveSessionHistory(history) {
+  return new Promise((resolve, reject) => {
+    const storage = globalThis.chrome?.storage?.session;
+    if (!storage) {
+      reject(new Error("Chrome session storage is unavailable."));
+      return;
+    }
+
+    storage.set({ [HISTORY_KEY]: history }, () => {
+      const storageError = globalThis.chrome?.runtime?.lastError;
+      if (storageError) {
+        reject(new Error(storageError.message));
+        return;
+      }
+
+      resolve();
+    });
+  });
+}
+
+function clearSessionHistory() {
+  return new Promise((resolve, reject) => {
+    const storage = globalThis.chrome?.storage?.session;
+    if (!storage) {
+      reject(new Error("Chrome session storage is unavailable."));
+      return;
+    }
+
+    storage.remove(HISTORY_KEY, () => {
+      const storageError = globalThis.chrome?.runtime?.lastError;
+      if (storageError) {
+        reject(new Error(storageError.message));
+        return;
+      }
+
+      resolve();
+    });
+  });
+}
 
 async function copyText(text) {
   if (navigator.clipboard?.writeText) {
@@ -128,6 +190,11 @@ function App() {
   const [entries, setEntries] = useState([]);
   const [fileName, setFileName] = useState("");
   const [error, setError] = useState("");
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [history, setHistory] = useState([]);
+  const [historyLoaded, setHistoryLoaded] = useState(false);
+  const [historyError, setHistoryError] = useState("");
+  const [view, setView] = useState("analysis");
 
   const [tab, setTab] = useState(0);
   const [selectedId, setSelectedId] = useState(null);
@@ -139,11 +206,51 @@ function App() {
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
-    if (globalThis.chrome?.storage?.local)
-      chrome.storage.local.get("harSettings", (r) =>
-        setSettings({ ...DEFAULTS, ...(r.harSettings || {}) }),
-      );
+    if (!globalThis.chrome?.storage?.local) {
+      setSettingsLoaded(true);
+      return;
+    }
+
+    chrome.storage.local.get("harSettings", (result) => {
+      const storageError = globalThis.chrome?.runtime?.lastError;
+      if (storageError) {
+        setError(`Unable to load settings: ${storageError.message}`);
+      } else {
+        setSettings({ ...DEFAULTS, ...(result.harSettings || {}) });
+      }
+      setSettingsLoaded(true);
+    });
   }, []);
+
+  useEffect(() => {
+    if (!settingsLoaded) return undefined;
+
+    let active = true;
+    if (!settings.historyEnabled) setView("analysis");
+    const loadHistory = settings.historyEnabled
+      ? getSessionHistory()
+      : clearSessionHistory().then(() => []);
+
+    loadHistory
+      .then((items) => {
+        if (!active) return;
+        setHistory(items);
+        setHistoryLoaded(true);
+        setHistoryError("");
+      })
+      .catch((storageError) => {
+        if (active) {
+          setHistoryLoaded(true);
+          setHistoryError(
+            `Unable to load upload history: ${storageError.message}`,
+          );
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [settings.historyEnabled, settingsLoaded]);
 
   const updateSetting = (key, value) => {
     const next = { ...settings, [key]: value };
@@ -151,10 +258,27 @@ function App() {
     setSaved(false);
   };
 
-  const saveSettings = () => {
-    if (globalThis.chrome?.storage?.local)
-      chrome.storage.local.set({ harSettings: settings }, () => setSaved(true));
-    else setSaved(true);
+  const saveSettings = async () => {
+    try {
+      if (globalThis.chrome?.storage?.local) {
+        await new Promise((resolve, reject) => {
+          chrome.storage.local.set({ harSettings: settings }, () => {
+            const storageError = globalThis.chrome?.runtime?.lastError;
+            if (storageError) {
+              reject(new Error(storageError.message));
+              return;
+            }
+            resolve();
+          });
+        });
+      }
+
+      setError("");
+      setSaved(true);
+    } catch (storageError) {
+      setSaved(false);
+      setError(`Unable to save settings: ${storageError.message}`);
+    }
   };
 
   const onFile = async (e) => {
@@ -162,7 +286,15 @@ function App() {
     if (!file) return;
     setError("");
     try {
-      const parsed = parseHar(await file.text());
+      const content = await file.text();
+      const parsed = parseHar(content);
+      const historyItem = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        fileName: file.name,
+        uploadedAt: new Date().toISOString(),
+        content,
+      };
+
       setEntries(parsed);
       setFileName(file.name);
       setSelectedId(parsed[0]?._id ?? null);
@@ -170,11 +302,50 @@ function App() {
       setFilter("all");
       setQuery("");
       setResourceQuery("");
+      setView("analysis");
+
+      if (settings.historyEnabled) {
+        try {
+          const existingHistory =
+            historyLoaded && !historyError
+              ? history
+              : await getSessionHistory();
+          const updatedHistory = [historyItem, ...existingHistory];
+          await saveSessionHistory(updatedHistory);
+          setHistory(updatedHistory);
+          setHistoryLoaded(true);
+          setHistoryError("");
+        } catch (storageError) {
+          setHistoryError(
+            `Analysis loaded, but this HAR could not be saved to session history: ${storageError.message}`,
+          );
+        }
+      }
     } catch (err) {
       setError(err.message || "Unable to parse this HAR file.");
       setEntries([]);
     }
     e.target.value = "";
+  };
+
+  const openHistoryItem = (item) => {
+    try {
+      const parsed = parseHar(item.content);
+      setEntries(parsed);
+      setFileName(item.fileName);
+      setSelectedId(parsed[0]?._id ?? null);
+      setTab(0);
+      setFilter("all");
+      setQuery("");
+      setResourceQuery("");
+      setError("");
+      setHistoryError("");
+      setView("analysis");
+    } catch (historyItemError) {
+      setHistoryError(
+        `Unable to open ${item.fileName}: ${historyItemError.message}`,
+      );
+    }
   };
 
   const terms = (settings.searchTerms || "")
@@ -271,16 +442,69 @@ function App() {
             </Typography>
           </div>
           <div className="grow" />
-          <Button
-            className={`settings-toggle ${settingsOpen ? "settings-toggle-open" : ""}`}
-            startIcon={settingsOpen ? <CloseIcon /> : <SettingsIcon />}
-            onClick={() => setSettingsOpen(!settingsOpen)}
-          >
-            {settingsOpen ? "Close settings" : "Settings"}
-          </Button>
+          {settings.historyEnabled && (
+            <Button
+              className="settings-toggle"
+              onClick={() => {
+                setView(view === "history" ? "analysis" : "history");
+                setSettingsOpen(false);
+              }}
+            >
+              {view === "history" ? "Back to analysis" : "History"}
+            </Button>
+          )}
+          {view !== "history" && (
+            <Button
+              className={`settings-toggle ${settingsOpen ? "settings-toggle-open" : ""}`}
+              startIcon={settingsOpen ? <CloseIcon /> : <SettingsIcon />}
+              onClick={() => setSettingsOpen(!settingsOpen)}
+            >
+              {settingsOpen ? "Close settings" : "Settings"}
+            </Button>
+          )}
         </Toolbar>
       </AppBar>
-      <main className="main">
+      <main className={`main ${view === "history" ? "history-mode" : ""}`}>
+        {view === "history" && (
+          <section className="history-section">
+            <Typography variant="h4">Upload history</Typography>
+            {historyError && (
+              <Paper className="error-box" role="alert">
+                {historyError}
+              </Paper>
+            )}
+            {!historyLoaded ? (
+              <Paper className="panel">
+                <Typography color="textSecondary">
+                  Loading session history...
+                </Typography>
+              </Paper>
+            ) : history.length ? (
+              <Paper className="history-list panel">
+                {history.map((item) => (
+                  <button
+                    key={item.id}
+                    className="history-item"
+                    onClick={() => openHistoryItem(item)}
+                  >
+                    <span className="history-file-name">{item.fileName}</span>
+                    <time dateTime={item.uploadedAt}>
+                      {new Date(item.uploadedAt).toLocaleString()}
+                    </time>
+                  </button>
+                ))}
+              </Paper>
+            ) : (
+              <Paper className="empty panel">
+                <Typography variant="h5">No upload history yet</Typography>
+                <Typography color="textSecondary">
+                  HAR files you upload during this browser session will appear
+                  here.
+                </Typography>
+              </Paper>
+            )}
+          </section>
+        )}
         <section className="intro">
           <div>
             <Typography variant="h4">HAR analysis dashboard</Typography>
@@ -332,6 +556,7 @@ function App() {
                   "showResources",
                   "Separate resource loading (JS, images, JSON)",
                 ],
+                ["historyEnabled", "Save uploaded files in session history"],
               ].map(([k, label]) => (
                 <Grid item xs={12} sm={6} key={k}>
                   <FormControlLabel
@@ -358,6 +583,12 @@ function App() {
                 />
               </Grid>
               <Grid item xs={12}>
+                <Typography variant="caption" color="textSecondary">
+                  Turning history off immediately deletes session history. Save
+                  settings to keep this choice for future sessions.
+                </Typography>
+              </Grid>
+              <Grid item xs={12}>
                 <Button
                   variant="contained"
                   color="primary"
@@ -371,6 +602,11 @@ function App() {
           </Paper>
         )}
         {error && <Paper className="error-box">{error}</Paper>}
+        {historyError && (
+          <Paper className="error-box" role="alert">
+            {historyError}
+          </Paper>
+        )}
         {!entries.length ? (
           <Paper className="empty panel">
             <div className="upload-icon">
