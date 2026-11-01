@@ -26,6 +26,7 @@ body {
   min-height: 76px;
   padding-left: 28px;
   padding-right: 28px;
+  gap: 10px;
 }
 .brand-mark {
   position: relative;
@@ -99,6 +100,36 @@ body {
   margin: 0 auto;
   padding: 30px 28px 18px;
 }
+.loading-banner {
+  margin-bottom: 18px;
+  padding: 12px 14px;
+  border: 1px solid #ccd3ff;
+  border-radius: 10px;
+  background: #f7f8ff;
+  color: #30366c;
+  box-shadow: 0 4px 14px #28347712;
+}
+.loading-banner-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 9px;
+  font-size: 13px;
+}
+.loading-progress {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #dde1f5;
+}
+.loading-progress span {
+  display: block;
+  height: 100%;
+  min-width: 2%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #5966d8, #9680e8);
+  transition: width 120ms ease;
+}
 .main.history-mode > :not(.history-section) {
   display: none;
 }
@@ -117,18 +148,38 @@ body {
   justify-content: space-between;
   gap: 16px;
   width: 100%;
-  padding: 18px 21px;
+  padding: 10px 21px 10px 0;
   border: 0;
   background: #fff;
   color: #24344e;
+  font: inherit;
+}
+.history-open-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex: 1;
+  align-self: stretch;
+  border: 0;
+  padding: 8px 12px 8px 21px;
+  background: transparent;
+  color: inherit;
   cursor: pointer;
   font: inherit;
   text-align: left;
 }
+.history-delete-button {
+  flex: 0 0 auto;
+  color: #c43b49 !important;
+}
+.history-delete-button:hover {
+  background: #fff0f2 !important;
+}
 .history-item + .history-item {
   border-top: 1px solid #eef1f8;
 }
-.history-item:hover {
+.history-open-item:hover {
   background: #f7f7ff;
 }
 .history-file-name {
@@ -137,6 +188,30 @@ body {
   font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.history-delete-toast {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  max-width: calc(100vw - 48px);
+  border-radius: 10px;
+  background: #252b60;
+  color: #fff;
+  box-shadow: 0 8px 24px #18204745;
+  padding: 10px 12px 10px 16px;
+  font-size: 13px;
+}
+.history-delete-toast span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.history-delete-toast .MuiButton-root {
+  color: #ffd36a;
 }
 .history-item time {
   flex-shrink: 0;
@@ -389,6 +464,97 @@ body {
   border-radius: 3px;
   background: linear-gradient(90deg, #4f5bd5, #a06bec);
 }
+.resource-type-filters {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 12px 18px;
+  background: #fff;
+  border-bottom: 1px solid #edf0f7;
+  scrollbar-width: thin;
+}
+.resource-type-filters button {
+  flex: 0 0 auto;
+  border: 1px solid #ccd3ec;
+  border-radius: 999px;
+  background: #fff;
+  color: #27304f;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  padding: 7px 11px;
+}
+.resource-type-filters button span {
+  margin-left: 3px;
+  color: #76809a;
+  font-size: 11px;
+}
+.resource-type-filters button:hover:not(:disabled) {
+  border-color: #6974d8;
+  background: #f4f5ff;
+}
+.resource-type-filters button.active {
+  border-color: #5966d8;
+  background: #5966d8;
+  color: #fff;
+}
+.resource-type-filters button.active span {
+  color: #e7e9ff;
+}
+.resource-type-filters button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+.status-filter-pills {
+  display: flex;
+  gap: 7px;
+  overflow-x: auto;
+  padding: 10px 18px;
+  border-bottom: 1px solid #edf0f7;
+  background: #fbfcff;
+}
+.status-filter-pills button {
+  flex: 0 0 auto;
+  border: 1px solid #d8ddeb;
+  border-radius: 8px;
+  background: #fff;
+  color: #596175;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  padding: 6px 10px;
+}
+.status-filter-pills button span {
+  margin-left: 3px;
+  opacity: 0.72;
+}
+.status-filter-pills button.active {
+  border-color: #5966d8;
+  background: #5966d8;
+  color: #fff;
+}
+.status-filter-pills button.status-200.active {
+  border-color: #16845b;
+  background: #16845b;
+}
+.status-filter-pills button.status-30x.active {
+  border-color: #b47711;
+  background: #b47711;
+}
+.status-filter-pills button.status-40x.active {
+  border-color: #c56a35;
+  background: #c56a35;
+}
+.status-filter-pills button.status-50x.active {
+  border-color: #c43b49;
+  background: #c43b49;
+}
+.status-filter-pills button:disabled {
+  cursor: default;
+  opacity: 0.42;
+}
 .filterbar {
   display: flex;
   align-items: center;
@@ -405,14 +571,117 @@ body {
 .status-select {
   min-width: 190px !important;
 }
+.clear-filters-button {
+  color: #c43b49 !important;
+}
 .request-list {
   max-height: 530px;
   overflow: auto;
+}
+.request-row-wrapper {
+  position: relative;
+  border-bottom: 1px solid #eef1f8;
+}
+.request-row-wrapper:last-child {
+  border-bottom: 0;
+}
+.request-compare-checkbox {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  z-index: 2;
+  width: 16px;
+  height: 16px;
+  margin: -8px 0 0;
+  accent-color: #5966d8;
+}
+.request-row-wrapper .request-row {
+  box-sizing: border-box;
+  padding-left: 38px;
+}
+.compare-button {
+  color: #5966d8 !important;
+}
+.export-button {
+  color: #317b67 !important;
+}
+.export-button.Mui-disabled {
+  color: rgba(0, 0, 0, 0.38) !important;
+}
+.comparison-panel {
+  position: relative;
+  grid-column: 1 / -1;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+.comparison-body-status {
+  margin-bottom: 16px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+.comparison-body-status.same {
+  color: #17744f;
+  background: #e2f7ec;
+}
+.comparison-body-status.different {
+  color: #9a5b13;
+  background: #fff2d9;
+}
+.comparison-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+.comparison-column {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.comparison-column .payload {
+  height: auto;
+}
+.comparison-request-body {
+  order: 0;
+  padding-bottom: 2px;
+}
+.comparison-request-body .payload-title {
+  background: linear-gradient(90deg, #fff0d7, #fff8e9);
+  border-bottom-color: #f2d39b;
+}
+.comparison-request-body .payload {
+  border-color: #efcf91;
+}
+.comparison-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.comparison-summary strong {
+  width: 100%;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 900px) {
+  .request-compare-checkbox {
+    left: 8px;
+  }
+  .request-row-wrapper .request-row {
+    padding-left: 32px;
+  }
+  .comparison-grid {
+    grid-template-columns: 1fr;
+  }
 }
 .request-row {
   display: block;
   text-align: left;
   width: 100%;
+  box-sizing: border-box;
   padding: 14px 18px;
   border: 0;
   border-bottom: 1px solid #eef1f8;
@@ -425,6 +694,10 @@ body {
 }
 .request-row:hover {
   background: #f7f7ff;
+}
+.request-row:focus-visible {
+ outline: 2px solid #5966d8;
+ outline-offset: -3px;
 }
 .request-row.selected {
   background: linear-gradient(90deg, #eef0ff, #f9f9ff);
@@ -475,9 +748,11 @@ body {
   background: #ffebe5;
 }
 .s5,
-.s0 {
+.s0,
+.status.failed-indicator {
   color: #a91f36;
   background: #ffe3e8;
+  box-shadow: inset 0 0 0 1px #f3bdc6;
 }
 .row-meta {
   display: flex;
@@ -564,6 +839,41 @@ body {
   flex: 1;
   color: #30366c;
 }
+.payload-format-badge {
+  border-radius: 999px;
+  background: #dfe4ff;
+  color: #4f57bd;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  padding: 3px 6px;
+}
+.payload-view-toggle {
+  display: flex;
+  flex: 0 0 auto;
+  border-radius: 7px;
+  overflow: hidden;
+  border: 1px solid #ccd3ec;
+  margin-right: 4px;
+}
+.payload-view-toggle button {
+  border: 0;
+  border-right: 1px solid #ccd3ec;
+  background: #fff;
+  color: #596175;
+  cursor: pointer;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 800;
+  padding: 4px 7px;
+}
+.payload-view-toggle button:last-child {
+  border-right: 0;
+}
+.payload-view-toggle button.active {
+  background: #5966d8;
+  color: #fff;
+}
 .payload-title .MuiButton-root {
   font-size: 10px;
   min-width: 0;
@@ -632,9 +942,12 @@ footer {
   .brand .MuiTypography-caption {
     font-size: 10px;
   }
+  .topbar .MuiToolbar-root {
+    gap: 6px;
+  }
   .settings-toggle {
     min-width: 0 !important;
-    padding: 7px 9px !important;
+    padding: 7px 7px !important;
     font-size: 12px !important;
   }
   .main {

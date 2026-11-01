@@ -5,6 +5,7 @@
   "description": "Chrome extension for local HAR analysis and response/resource inspection",
   "scripts": {
     "build": "webpack --mode production && cp manifest.json background.js dist/ && cp -R icons dist/icons",
+    "test": "node --test src/*.test.js",
     "dev": "webpack --mode development",
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\""
   },

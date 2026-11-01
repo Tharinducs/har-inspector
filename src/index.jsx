@@ -1,7 +1,8 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import ReactDOM from "react-dom";
 import SettingsIcon from "@material-ui/icons/Settings";
 import CloseIcon from "@material-ui/icons/Close";
+import DeleteOutlineIcon from "@material-ui/icons/DeleteOutline";
 import CloudUploadIcon from "@material-ui/icons/CloudUpload";
 import SearchIcon from "@material-ui/icons/Search";
 import InsertDriveFileIcon from "@material-ui/icons/InsertDriveFile";
@@ -29,6 +30,15 @@ import {
 } from "@material-ui/core";
 import "./styles.css";
 
+const {
+  RESOURCE_TYPES,
+  statusGroup,
+  isFailedRequest,
+  parseHar,
+} = require("./harUtils");
+const { asText, formatPayload, getRequestBody } = require("./payloadUtils");
+const { HISTORY_KEY, getSessionHistory, saveSessionHistory, clearSessionHistory } = require("./historyStorage");
+
 const DEFAULTS = {
   show200: true,
   show30x: true,
@@ -40,70 +50,16 @@ const DEFAULTS = {
 };
 
 const STATUS_GROUPS = ["200", "30x", "40x", "50x"];
-const HISTORY_KEY = "harHistory";
 
-const asText = (v) =>
-  v == null ? "" : typeof v === "string" ? v : JSON.stringify(v, null, 2);
-
-function getSessionHistory() {
-  return new Promise((resolve, reject) => {
-    const storage = globalThis.chrome?.storage?.session;
-    if (!storage) {
-      reject(new Error("Chrome session storage is unavailable."));
-      return;
-    }
-
-    storage.get(HISTORY_KEY, (result) => {
-      const storageError = globalThis.chrome?.runtime?.lastError;
-      if (storageError) {
-        reject(new Error(storageError.message));
-        return;
-      }
-
-      resolve(Array.isArray(result[HISTORY_KEY]) ? result[HISTORY_KEY] : []);
-    });
-  });
-}
-
-function saveSessionHistory(history) {
-  return new Promise((resolve, reject) => {
-    const storage = globalThis.chrome?.storage?.session;
-    if (!storage) {
-      reject(new Error("Chrome session storage is unavailable."));
-      return;
-    }
-
-    storage.set({ [HISTORY_KEY]: history }, () => {
-      const storageError = globalThis.chrome?.runtime?.lastError;
-      if (storageError) {
-        reject(new Error(storageError.message));
-        return;
-      }
-
-      resolve();
-    });
-  });
-}
-
-function clearSessionHistory() {
-  return new Promise((resolve, reject) => {
-    const storage = globalThis.chrome?.storage?.session;
-    if (!storage) {
-      reject(new Error("Chrome session storage is unavailable."));
-      return;
-    }
-
-    storage.remove(HISTORY_KEY, () => {
-      const storageError = globalThis.chrome?.runtime?.lastError;
-      if (storageError) {
-        reject(new Error(storageError.message));
-        return;
-      }
-
-      resolve();
-    });
-  });
-}
+const REQUEST_FILTERS_KEY = "harRequestFilters";
+const DEFAULT_REQUEST_FILTERS = {
+  tab: 0,
+  filter: "all",
+  query: "",
+  resourceQuery: "",
+  resourceTypeFilter: "all",
+  statusFilter: "all",
+};
 
 async function copyText(text) {
   if (navigator.clipboard?.writeText) {
@@ -131,65 +87,69 @@ async function copyText(text) {
   if (!copied) throw new Error("Clipboard access is unavailable.");
 }
 
-const getHeader = (headers, name) =>
-  (headers || []).find(
-    (h) => (h.name || "").toLowerCase() === name.toLowerCase(),
-  )?.value || "";
-
-const isResource = (e) => {
-  const mime = (
-    e.response?.content?.mimeType ||
-    getHeader(e.response?.headers, "content-type")
-  ).toLowerCase();
-  const url = (e.request?.url || "").toLowerCase().split("?")[0];
-  const ext = (url.match(/\.([a-z0-9]+)$/) || [])[1] || "";
-  if (
-    /javascript|ecmascript|\.m?js$/.test(mime + " " + url) ||
-    ["js", "mjs", "cjs"].includes(ext)
-  )
-    return "JavaScript";
-  if (
-    /image\//.test(mime) ||
-    ["png", "jpg", "jpeg", "gif", "svg", "webp", "ico", "avif"].includes(ext)
-  )
-    return "Image";
-  if (/json/.test(mime) || ext === "json") return "JSON";
-  return "Other";
+const cleanExportEntry = (entry) => {
+  const { _id, _status, _body, _requestBody, _requestType, _resource, _url, _method, _time, ...harEntry } = entry;
+  return {
+    ...harEntry,
+    inspector: {
+      status: entry._status,
+      method: entry._method,
+      url: entry._url,
+      resourceType: entry._requestType,
+      resource: entry._resource,
+      time: entry._time,
+    },
+  };
 };
 
-function parseHar(raw) {
-  const har = typeof raw === "string" ? JSON.parse(raw) : raw;
-  const entries = har?.log?.entries;
-  if (!Array.isArray(entries))
-    throw new Error(
-      "This file does not look like a valid HAR: log.entries was not found.",
-    );
-  return entries.map((e, i) => ({
-    ...e,
-    _id: i,
-    _status: Number(e.response?.status || 0),
-    _body: e.response?.content?.text || "",
-    _requestBody: e.request?.postData?.text || "",
-    _resource: isResource(e),
-    _url: e.request?.url || "(URL unavailable)",
-    _method: e.request?.method || "—",
-    _time: Number(e.time || 0),
-  }));
-}
+const downloadTextFile = (content, fileName, type) => {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = fileName;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+};
 
-function statusGroup(code) {
-  if (code >= 200 && code < 300) return "200";
-  if (code >= 300 && code < 400) return "30x";
-  if (code >= 400 && code < 500) return "40x";
-  if (code >= 500 && code < 600) return "50x";
-  return "other";
-}
+const csvCell = (value) => {
+  let text = value == null ? "" : String(value);
+  if (/^[=+\-@]/.test(text)) text = `'${text}`;
+  return `"${text.replace(/"/g, '""')}"`;
+};
+
+const exportCsv = (entries) => {
+  const columns = [
+    ["method", (entry) => entry.request?.method || entry._method],
+    ["url", (entry) => entry.request?.url || entry._url],
+    ["status", (entry) => entry.response?.status ?? entry._status],
+    ["statusText", (entry) => entry.response?.statusText || ""],
+    ["resourceType", (entry) => entry._requestType],
+    ["timeMs", (entry) => entry._time],
+    ["requestBytes", (entry) => entry.request?.bodySize ?? ""],
+    ["responseBytes", (entry) => entry.response?.bodySize ?? entry.response?.content?.size ?? ""],
+    ["mimeType", (entry) => entry.response?.content?.mimeType || ""],
+  ];
+  const rows = entries.map((entry) => columns.map(([, getValue]) => csvCell(getValue(entry))).join(","));
+  return `${columns.map(([name]) => csvCell(name)).join(",")}\r\n${rows.join("\r\n")}`;
+};
+
+const exportBaseName = (fileName) =>
+  (fileName || "har-export")
+    .replace(/\.har$/i, "")
+    .replace(/[^a-z0-9_-]+/gi, "-")
+    .replace(/^-+|-+$/g, "") || "har-export";
 
 function App() {
   const [settings, setSettings] = useState(DEFAULTS);
   const [entries, setEntries] = useState([]);
   const [fileName, setFileName] = useState("");
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [loadingProgress, setLoadingProgress] = useState(0);
+  const [loadingMessage, setLoadingMessage] = useState("");
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [history, setHistory] = useState([]);
   const [historyLoaded, setHistoryLoaded] = useState(false);
@@ -198,29 +158,73 @@ function App() {
 
   const [tab, setTab] = useState(0);
   const [selectedId, setSelectedId] = useState(null);
+  const [compareIds, setCompareIds] = useState([]);
+  const [compareOpen, setCompareOpen] = useState(false);
   const [filter, setFilter] = useState("all");
   const [query, setQuery] = useState("");
   const [resourceQuery, setResourceQuery] = useState("");
+  const [resourceTypeFilter, setResourceTypeFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [requestFiltersLoaded, setRequestFiltersLoaded] = useState(false);
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [deletedHistoryEntry, setDeletedHistoryEntry] = useState(null);
+  const undoTimeoutRef = useRef(null);
+  const requestSearchRef = useRef(null);
+
+  useEffect(() => () => window.clearTimeout(undoTimeoutRef.current), []);
 
   useEffect(() => {
     if (!globalThis.chrome?.storage?.local) {
+      setRequestFiltersLoaded(true);
       setSettingsLoaded(true);
       return;
     }
 
-    chrome.storage.local.get("harSettings", (result) => {
+    chrome.storage.local.get(["harSettings", REQUEST_FILTERS_KEY], (result) => {
       const storageError = globalThis.chrome?.runtime?.lastError;
       if (storageError) {
         setError(`Unable to load settings: ${storageError.message}`);
       } else {
         setSettings({ ...DEFAULTS, ...(result.harSettings || {}) });
+        const savedFilters = result[REQUEST_FILTERS_KEY] || {};
+        setTab(savedFilters.tab === 1 ? 1 : 0);
+        setFilter(savedFilters.filter || "all");
+        setQuery(savedFilters.query || "");
+        setResourceQuery(savedFilters.resourceQuery || "");
+        setResourceTypeFilter(savedFilters.resourceTypeFilter || "all");
+        setStatusFilter(savedFilters.statusFilter || "all");
       }
+      setRequestFiltersLoaded(true);
       setSettingsLoaded(true);
     });
   }, []);
+
+  useEffect(() => {
+    if (!requestFiltersLoaded || !globalThis.chrome?.storage?.local) return undefined;
+    const timeoutId = window.setTimeout(() => {
+      chrome.storage.local.set({
+        [REQUEST_FILTERS_KEY]: {
+          tab,
+          filter,
+          query,
+          resourceQuery,
+          resourceTypeFilter,
+          statusFilter,
+        },
+      });
+    }, 150);
+    return () => window.clearTimeout(timeoutId);
+  }, [
+    requestFiltersLoaded,
+    tab,
+    filter,
+    query,
+    resourceQuery,
+    resourceTypeFilter,
+    statusFilter,
+  ]);
 
   useEffect(() => {
     if (!settingsLoaded) return undefined;
@@ -258,6 +262,66 @@ function App() {
     setSaved(false);
   };
 
+  const clearRequestFilters = () => {
+    setTab(0);
+    setFilter("all");
+    setQuery("");
+    setResourceQuery("");
+    setResourceTypeFilter("all");
+    setStatusFilter("all");
+  };
+
+  const hasActiveRequestFilters =
+    tab === 1 ||
+    filter !== "all" ||
+    !!query.trim() ||
+    !!resourceQuery.trim() ||
+    resourceTypeFilter !== "all" ||
+    statusFilter !== "all";
+
+  const deleteHistoryItem = async (itemId) => {
+    const deletedIndex = history.findIndex((item) => item.id === itemId);
+    if (deletedIndex === -1) return;
+    const deletedItem = history[deletedIndex];
+    if (!window.confirm(`Delete ${deletedItem.fileName} from history?`)) return;
+
+    try {
+      const nextHistory = history.filter((item) => item.id !== itemId);
+      await saveSessionHistory(nextHistory);
+      setHistory(nextHistory);
+      setHistoryError("");
+      window.clearTimeout(undoTimeoutRef.current);
+      setDeletedHistoryEntry({ item: deletedItem, index: deletedIndex });
+      undoTimeoutRef.current = window.setTimeout(
+        () => setDeletedHistoryEntry(null),
+        8000,
+      );
+    } catch (storageError) {
+      setHistoryError(
+        `Unable to delete upload history item: ${storageError.message}`,
+      );
+    }
+  };
+
+  const undoDeleteHistoryItem = async () => {
+    if (!deletedHistoryEntry) return;
+    try {
+      const { item, index } = deletedHistoryEntry;
+      if (history.some((entry) => entry.id === item.id)) return;
+      const nextHistory = [...history];
+      nextHistory.splice(Math.min(index, nextHistory.length), 0, item);
+      await saveSessionHistory(nextHistory);
+      setHistory(nextHistory);
+      window.clearTimeout(undoTimeoutRef.current);
+      setDeletedHistoryEntry(null);
+      setHistoryError("");
+    } catch (storageError) {
+      setHistoryError(
+        `Unable to restore upload history item: ${storageError.message}`,
+      );
+    }
+  };
+
   const saveSettings = async () => {
     try {
       if (globalThis.chrome?.storage?.local) {
@@ -286,8 +350,12 @@ function App() {
     if (!file) return;
     setError("");
     try {
+      setLoading(true);
+      setLoadingProgress(0);
+      setLoadingMessage(file.size > 20 * 1024 * 1024 ? "Reading large HAR file..." : "Reading HAR file...");
       const content = await file.text();
-      const parsed = parseHar(content);
+      setLoadingMessage("Parsing requests...");
+      const parsed = await parseHar(content, setLoadingProgress);
       const historyItem = {
         id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
         fileName: file.name,
@@ -295,13 +363,10 @@ function App() {
         content,
       };
 
+      clearRequestFilters();
       setEntries(parsed);
       setFileName(file.name);
       setSelectedId(parsed[0]?._id ?? null);
-      setTab(0);
-      setFilter("all");
-      setQuery("");
-      setResourceQuery("");
       setView("analysis");
 
       if (settings.historyEnabled) {
@@ -324,20 +389,24 @@ function App() {
     } catch (err) {
       setError(err.message || "Unable to parse this HAR file.");
       setEntries([]);
+    } finally {
+      setLoading(false);
+      setLoadingProgress(0);
+      setLoadingMessage("");
     }
     e.target.value = "";
   };
 
-  const openHistoryItem = (item) => {
+  const openHistoryItem = async (item) => {
     try {
-      const parsed = parseHar(item.content);
+      setLoading(true);
+      setLoadingProgress(0);
+      setLoadingMessage("Loading saved HAR...");
+      const parsed = await parseHar(item.content, setLoadingProgress);
+      clearRequestFilters();
       setEntries(parsed);
       setFileName(item.fileName);
       setSelectedId(parsed[0]?._id ?? null);
-      setTab(0);
-      setFilter("all");
-      setQuery("");
-      setResourceQuery("");
       setError("");
       setHistoryError("");
       setView("analysis");
@@ -345,6 +414,10 @@ function App() {
       setHistoryError(
         `Unable to open ${item.fileName}: ${historyItemError.message}`,
       );
+    } finally {
+      setLoading(false);
+      setLoadingProgress(0);
+      setLoadingMessage("");
     }
   };
 
@@ -353,22 +426,60 @@ function App() {
     .map((s) => s.trim())
     .filter(Boolean);
 
+  const requestSummary = useMemo(() => {
+    const counts = { "200": 0, "30x": 0, "40x": 0, "50x": 0, other: 0 };
+    let resourceSuccess = 0;
+    let resourceFailure = 0;
+    let bodyMatches = 0;
+
+    entries.forEach((entry) => {
+      const group = statusGroup(entry._status);
+      counts[group] = (counts[group] || 0) + 1;
+      const failed = isFailedRequest(entry, terms);
+      if (entry._resource !== "Other" && entry._status >= 200 && entry._status < 400 && !failed) resourceSuccess += 1;
+      if (entry._resource !== "Other" && failed) resourceFailure += 1;
+      if (terms.some((term) => String(entry._body || "").toLowerCase().includes(term.toLowerCase()))) bodyMatches += 1;
+    });
+
+    return { counts, resourceSuccess, resourceFailure, bodyMatches };
+  }, [entries, settings.searchTerms]);
+
+  const requestTypeCounts = useMemo(() => {
+    const counts = Object.fromEntries(RESOURCE_TYPES.map((type) => [type, 0]));
+    entries.forEach((entry) => {
+      counts[entry._requestType] = (counts[entry._requestType] || 0) + 1;
+    });
+    return counts;
+  }, [entries]);
+
   const visibleEntries = useMemo(
     () =>
       entries.filter((e) => {
-        if (tab === 2 && e._resource === "Other") return false;
         const group = statusGroup(e._status);
         if (group === "200" && !settings.show200) return false;
         if (group === "30x" && !settings.show30x) return false;
         if (group === "40x" && !settings.show40x) return false;
         if (group === "50x" && !settings.show50x) return false;
         if (
+          tab === 0 &&
+          statusFilter !== "all" &&
+          statusGroup(e._status) !== statusFilter
+        )
+          return false;
+        if (
+          tab === 0 &&
+          resourceTypeFilter !== "all" &&
+          e._requestType !== resourceTypeFilter
+        )
+          return false;
+        if (
           filter === "resource-success" &&
           !(
             settings.showResources &&
             e._resource !== "Other" &&
             e._status >= 200 &&
-            e._status < 400
+            e._status < 400 &&
+            !isFailedRequest(e, terms)
           )
         )
           return false;
@@ -377,7 +488,7 @@ function App() {
           !(
             settings.showResources &&
             e._resource !== "Other" &&
-            (e._status >= 400 || e._status === 0)
+            isFailedRequest(e, terms)
           )
         )
           return false;
@@ -390,39 +501,112 @@ function App() {
           return false;
         if (
           query &&
-          tab !== 2 &&
+          tab !== 0 &&
           !`${e._url} ${e._method} ${e._status} ${e._resource}`
             .toLowerCase()
             .includes(query.toLowerCase())
         )
           return false;
         if (
-          tab === 2 &&
+          tab === 0 &&
           resourceQuery &&
-          !`${e._url} ${e._method} ${e._status} ${e._resource}`
+          !`${e._url} ${e._method} ${e._status} ${e._resource} ${e._requestType}`
             .toLowerCase()
             .includes(resourceQuery.toLowerCase())
         )
           return false;
         return true;
       }),
-    [entries, settings, filter, query, resourceQuery, tab],
+    [entries, settings, filter, query, resourceQuery, tab, resourceTypeFilter, statusFilter],
   );
 
   const selected = entries.find((e) => e._id === selectedId);
-  const count = (group) =>
-    entries.filter((e) => statusGroup(e._status) === group).length;
+  const compareEntries = compareIds.map((id) => entries.find((e) => e._id === id)).filter(Boolean);
+  const requestBodiesMatch = compareEntries.length === 2 &&
+    getRequestBody(compareEntries[0]) === getRequestBody(compareEntries[1]);
 
-  const resourceSuccess = entries.filter(
-    (e) => e._resource !== "Other" && e._status >= 200 && e._status < 400,
-  ).length;
-  const resourceFailure = entries.filter(
-    (e) => e._resource !== "Other" && (e._status >= 400 || e._status === 0),
-  ).length;
+  const exportRequests = (format) => {
+    const baseName = exportBaseName(fileName);
+    if (format === "csv") {
+      downloadTextFile(exportCsv(visibleEntries), `${baseName}-filtered.csv`, "text/csv;charset=utf-8");
+    } else {
+      downloadTextFile(
+        JSON.stringify(visibleEntries.map(cleanExportEntry), null, 2),
+        `${baseName}-filtered.json`,
+        "application/json;charset=utf-8",
+      );
+    }
+  };
 
-  const matches = entries.filter((e) =>
-    terms.some((t) => (e._body || "").toLowerCase().includes(t.toLowerCase())),
-  );
+  const exportSelected = () => {
+    const baseName = exportBaseName(fileName);
+    downloadTextFile(
+      JSON.stringify(compareEntries.map(cleanExportEntry), null, 2),
+      `${baseName}-selected.json`,
+      "application/json;charset=utf-8",
+    );
+  };
+  const count = (group) => requestSummary.counts[group] || 0;
+  const resourceSuccess = requestSummary.resourceSuccess;
+  const resourceFailure = requestSummary.resourceFailure;
+  const matches = { length: requestSummary.bodyMatches };
+
+  useEffect(() => {
+    const handleKeyboardNavigation = (event) => {
+      const target = event.target;
+      const isEditing = target instanceof HTMLElement &&
+        (target.matches("input, textarea, select") || target.isContentEditable);
+
+      if (event.key === "/" && !isEditing) {
+        event.preventDefault();
+        requestSearchRef.current?.focus();
+        requestSearchRef.current?.select();
+        return;
+      }
+
+      if (event.key === "Escape") {
+        if (isEditing) {
+          if (tab === 0 && resourceQuery) setResourceQuery("");
+          else if (tab === 1 && query) setQuery("");
+          else target.blur();
+        } else if (compareOpen) {
+          setCompareOpen(false);
+        } else if (selectedId !== null) {
+          setSelectedId(null);
+        }
+        return;
+      }
+
+      if (isEditing || !visibleEntries.length) return;
+
+      if (event.key === "Enter" && selectedId !== null) {
+        event.preventDefault();
+        window.requestAnimationFrame(() => {
+          document.querySelector(".detail")?.scrollIntoView({ block: "start" });
+        });
+        return;
+      }
+
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const currentIndex = visibleEntries.findIndex((entry) => entry._id === selectedId);
+        const direction = event.key === "ArrowDown" ? 1 : -1;
+        const nextIndex = currentIndex === -1
+          ? (direction === 1 ? 0 : visibleEntries.length - 1)
+          : Math.max(0, Math.min(visibleEntries.length - 1, currentIndex + direction));
+        const nextEntry = visibleEntries[nextIndex];
+        setSelectedId(nextEntry._id);
+        window.requestAnimationFrame(() => {
+          document.querySelector(`[data-request-id="${nextEntry._id}"]`)?.scrollIntoView({
+            block: "nearest",
+          });
+        });
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyboardNavigation);
+    return () => window.removeEventListener("keydown", handleKeyboardNavigation);
+  }, [compareOpen, query, resourceQuery, selectedId, tab, visibleEntries]);
 
   const fmt = (n) => `${Number(n || 0).toFixed(1)} ms`;
 
@@ -465,6 +649,17 @@ function App() {
         </Toolbar>
       </AppBar>
       <main className={`main ${view === "history" ? "history-mode" : ""}`}>
+        {loading && (
+          <div className="loading-banner" role="status" aria-live="polite">
+            <div className="loading-banner-head">
+              <strong>{loadingMessage}</strong>
+              <span>{loadingProgress}%</span>
+            </div>
+            <div className="loading-progress" aria-label={`${loadingProgress}% loaded`}>
+              <span style={{ width: `${loadingProgress}%` }} />
+            </div>
+          </div>
+        )}
         {view === "history" && (
           <section className="history-section">
             <Typography variant="h4">Upload history</Typography>
@@ -482,16 +677,27 @@ function App() {
             ) : history.length ? (
               <Paper className="history-list panel">
                 {history.map((item) => (
-                  <button
-                    key={item.id}
-                    className="history-item"
-                    onClick={() => openHistoryItem(item)}
-                  >
-                    <span className="history-file-name">{item.fileName}</span>
-                    <time dateTime={item.uploadedAt}>
-                      {new Date(item.uploadedAt).toLocaleString()}
-                    </time>
-                  </button>
+                  <div key={item.id} className="history-item">
+                    <button
+                      className="history-open-item"
+                      onClick={() => openHistoryItem(item)}
+                    >
+                      <span className="history-file-name">{item.fileName}</span>
+                      <time dateTime={item.uploadedAt}>
+                        {new Date(item.uploadedAt).toLocaleString()}
+                      </time>
+                    </button>
+                    <Button
+                      className="history-delete-button"
+                      size="small"
+                      aria-label={`Delete ${item.fileName} from history`}
+                      title="Delete from history"
+                      startIcon={<DeleteOutlineIcon />}
+                      onClick={() => deleteHistoryItem(item.id)}
+                    >
+                      Delete
+                    </Button>
+                  </div>
                 ))}
               </Paper>
             ) : (
@@ -504,6 +710,12 @@ function App() {
               </Paper>
             )}
           </section>
+        )}
+        {deletedHistoryEntry && (
+          <div className="history-delete-toast" role="status">
+            <span>{deletedHistoryEntry.item.fileName} deleted</span>
+            <Button size="small" onClick={undoDeleteHistoryItem}>Undo</Button>
+          </div>
         )}
         <section className="intro">
           <div>
@@ -644,7 +856,12 @@ function App() {
                   setEntries([]);
                   setFileName("");
                   setSelectedId(null);
+                  setCompareIds([]);
+                  setCompareOpen(false);
                   setResourceQuery("");
+                  setResourceTypeFilter("all");
+                  setStatusFilter("all");
+                  clearRequestFilters();
                 }}
               >
                 Clear file
@@ -712,7 +929,7 @@ function App() {
                     }}
                   >
                     <span>
-                      {entries.filter((e) => e._resource !== "Other").length}
+                      {entries.filter((entry) => entry._resource !== "Other").length}
                     </span>
                     <small>Total resources</small>
                   </button>
@@ -725,6 +942,7 @@ function App() {
                 onChange={(_, v) => {
                   setTab(v);
                   setFilter(v === 1 ? "search-match" : "all");
+                  setResourceTypeFilter("all");
                 }}
                 indicatorColor="primary"
                 textColor="primary"
@@ -733,28 +951,79 @@ function App() {
               >
                 <Tab label={`All requests (${entries.length})`} />
                 <Tab label={`Body matches (${matches.length})`} />
-                <Tab
-                  label={`Resource loads (${entries.filter((e) => e._resource !== "Other").length})`}
-                />
               </Tabs>
               <Divider />
+              {tab === 0 && (
+                <div
+                  className="resource-type-filters"
+                  role="group"
+                  aria-label="Filter requests by resource type"
+                >
+                  <button
+                    type="button"
+                    className={resourceTypeFilter === "all" ? "active" : ""}
+                    aria-pressed={resourceTypeFilter === "all"}
+                    onClick={() => setResourceTypeFilter("all")}
+                  >
+                    All <span>{entries.length}</span>
+                  </button>
+                  {RESOURCE_TYPES.map((type) => {
+                    const count = requestTypeCounts[type] || 0;
+                    return (
+                      <button
+                        key={type}
+                        type="button"
+                        className={resourceTypeFilter === type ? "active" : ""}
+                        aria-pressed={resourceTypeFilter === type}
+                        onClick={() => setResourceTypeFilter(type)}
+                        disabled={count === 0}
+                      >
+                        {type} <span>{count}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              {tab === 0 && (
+                <div className="status-filter-pills" role="group" aria-label="Filter requests by status">
+                  {[
+                    ["all", "All", entries.length],
+                    ["200", "2xx", count("200")],
+                    ["30x", "3xx", count("30x")],
+                    ["40x", "4xx", count("40x")],
+                    ["50x", "5xx", count("50x")],
+                  ].map(([value, label, statusCount]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      className={statusFilter === value ? `active status-${value}` : `status-${value}`}
+                      aria-pressed={statusFilter === value}
+                      disabled={statusCount === 0 && value !== "all"}
+                      onClick={() => setStatusFilter(value)}
+                    >
+                      {label} <span>{statusCount}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
               <div className="filterbar">
-                {tab === 2 ? (
+                {tab === 0 ? (
                   <>
                     <TextField
+                      inputRef={requestSearchRef}
                       size="small"
                       variant="outlined"
-                      placeholder="Search resources by URL, method, status, or type..."
+                      placeholder="Search requests by URL, method, status, or type..."
                       inputProps={{
                         "aria-label":
-                          "Search resources by URL, method, status, or type",
+                          "Search requests by URL, method, status, or type",
                       }}
                       value={resourceQuery}
                       onChange={(e) => setResourceQuery(e.target.value)}
                     />
                     <Button
                       size="small"
-                      aria-label="Clear resource search"
+                      aria-label="Clear request search"
                       disabled={!resourceQuery}
                       onClick={() => setResourceQuery("")}
                     >
@@ -763,6 +1032,7 @@ function App() {
                   </>
                 ) : (
                   <TextField
+                    inputRef={requestSearchRef}
                     size="small"
                     variant="outlined"
                     placeholder="Search URL, method, status..."
@@ -798,55 +1068,157 @@ function App() {
                     )}
                   </Select>
                 </FormControl>
+                {hasActiveRequestFilters && (
+                  <Button
+                    size="small"
+                    className="clear-filters-button"
+                    onClick={clearRequestFilters}
+                  >
+                    Clear all filters
+                  </Button>
+                )}
+                <Button
+                  size="small"
+                  className="compare-button"
+                  disabled={compareIds.length !== 2}
+                  onClick={() => setCompareOpen(true)}
+                >
+                  Compare {compareIds.length ? `(${compareIds.length}/2)` : ""}
+                </Button>
+                {compareIds.length > 0 && (
+                  <>
+                    <Button
+                      size="small"
+                      onClick={() => setCompareIds([])}
+                    >
+                      Clear selection
+                    </Button>
+                    <Button
+                      size="small"
+                      className="export-button"
+                      onClick={exportSelected}
+                    >
+                      Export selected JSON
+                    </Button>
+                  </>
+                )}
+                <Button
+                  size="small"
+                  className="export-button"
+                  disabled={!visibleEntries.length}
+                  onClick={() => exportRequests("json")}
+                >
+                  Export JSON
+                </Button>
+                <Button
+                  size="small"
+                  className="export-button"
+                  disabled={!visibleEntries.length}
+                  onClick={() => exportRequests("csv")}
+                >
+                  Export CSV
+                </Button>
                 <Typography variant="caption" color="textSecondary">
                   {visibleEntries.length} shown · select a row to inspect
-                  details
+                  details · select two to compare
                 </Typography>
               </div>
               <div className="request-list">
                 {visibleEntries.map((e) => (
-                  <button
+                  <div
                     key={e._id}
-                    className={`request-row ${selectedId === e._id ? "selected" : ""}`}
-                    onClick={() => setSelectedId(e._id)}
+                    className={`request-row-wrapper ${compareIds.includes(e._id) ? "comparing" : ""}`}
                   >
-                    <div className="row-main">
-                      <span
-                        className={`method ${e._method === "GET" ? "get" : "other-method"}`}
-                      >
-                        {e._method}
-                      </span>
-                      <span className="url" title={e._url}>
-                        {e._url}
-                      </span>
-                      <span
-                        className={`status ${e._status >= 500 ? "s5" : e._status >= 400 ? "s4" : e._status >= 300 ? "s3" : e._status >= 200 ? "s2" : "s0"}`}
-                      >
-                        {e._status || "ERR"}
-                      </span>
-                    </div>
-                    <div className="row-meta">
-                      <span>
-                        {e._resource !== "Other" ? e._resource : "Request"}
-                      </span>
-                      <span>{fmt(e._time)}</span>
-                      <span>
-                        {e.response?.content?.size ??
-                          e.response?.bodySize ??
-                          "—"}{" "}
-                        bytes
-                      </span>
-                    </div>
-                  </button>
+                    <input
+                      type="checkbox"
+                      className="request-compare-checkbox"
+                      checked={compareIds.includes(e._id)}
+                      aria-label={`Select ${e._method} ${e._url} for comparison`}
+                      title="Select for comparison"
+                      onChange={() => {
+                        setCompareIds((current) =>
+                          current.includes(e._id)
+                            ? current.filter((id) => id !== e._id)
+                            : current.length < 2
+                              ? [...current, e._id]
+                              : current,
+                        );
+                        setCompareOpen(false);
+                      }}
+                    />
+                    <button
+                      data-request-id={e._id}
+                      className={`request-row keyboard-row ${selectedId === e._id ? "selected" : ""}`}
+                      onClick={() => setSelectedId(e._id)}
+                    >
+                      <div className="row-main">
+                        <span className={`method ${e._method === "GET" ? "get" : "other-method"}`}>
+                          {e._method}
+                        </span>
+                        <span className="url" title={e._url}>{e._url}</span>
+                        <span className={`status ${isFailedRequest(e, terms) ? "failed-indicator" : e._status >= 500 ? "s5" : e._status >= 400 ? "s4" : e._status >= 300 ? "s3" : e._status >= 200 ? "s2" : "s0"}`}>
+                          {e._status || "ERR"}
+                        </span>
+                      </div>
+                      <div className="row-meta">
+                        <span>{e._resource !== "Other" ? e._resource : "Request"}</span>
+                        <span>{fmt(e._time)}</span>
+                        <span>
+                          {e.response?.content?.size ?? e.response?.bodySize ?? "—"} bytes
+                        </span>
+                      </div>
+                    </button>
+                  </div>
                 ))}
                 {!visibleEntries.length && (
-                  <div className="no-results">
-                    No requests match these filters.
-                  </div>
+                  <div className="no-results">No requests match these filters.</div>
                 )}
               </div>
             </Paper>
-            {selected && (
+            {compareOpen && compareEntries.length === 2 && (
+              <Paper className="panel comparison-panel">
+                <div className="detail-heading">
+                  <div>
+                    <Typography variant="h6">Request comparison</Typography>
+                    <Typography variant="caption" color="textSecondary">
+                      Side-by-side comparison of the two selected requests
+                    </Typography>
+                  </div>
+                  <Button size="small" onClick={() => setCompareOpen(false)}>Close</Button>
+                </div>
+                {compareEntries.length === 2 && (
+                  <div className={`comparison-body-status ${requestBodiesMatch ? "same" : "different"}`}>
+                    Request bodies are <strong>{requestBodiesMatch ? "identical" : "different"}</strong>
+                  </div>
+                )}
+                <div className="comparison-grid">
+                  {compareEntries.map((entry) => (
+                    <div className="comparison-column" key={entry._id}>
+                      <div className="comparison-summary">
+                        <span className="method get">{entry._method}</span>
+                        <span className={`status ${isFailedRequest(entry, terms) ? "failed-indicator" : `s${entry._status >= 500 ? 5 : entry._status >= 400 ? 4 : entry._status >= 300 ? 3 : entry._status >= 200 ? 2 : 0}`}`}>
+                          {entry._status || "ERR"}
+                        </span>
+                        <strong>{entry._url}</strong>
+                        <Typography variant="caption" color="textSecondary">
+                          {fmt(entry._time)} · {entry._resource}
+                        </Typography>
+                      </div>
+                      <div className="comparison-request-body">
+                        <Payload
+                          title={`Request body${requestBodiesMatch ? " · Same" : " · Different"}`}
+                          value={getRequestBody(entry) || "(No request body recorded)"}
+                        />
+                      </div>
+                      <Payload title="Request headers" value={entry.request?.headers?.map((h) => ({ [h.name]: h.value }))} />
+                      <Payload title="Response headers" value={entry.response?.headers?.map((h) => ({ [h.name]: h.value }))} />
+                      <Payload title="Response body" value={entry.response?.content?.text ?? ""} />
+                    </div>
+                  ))}
+                </div>
+              </Paper>
+            )}
+            {selected && !compareOpen && (
               <Paper className="panel detail">
                 <div className="detail-heading">
                   <div>
@@ -863,7 +1235,7 @@ function App() {
                     size="small"
                     label={`${selected._status || "ERR"} · ${fmt(selected._time)}`}
                     className={
-                      selected._status >= 400 ? "chip-error" : "chip-ok"
+                      isFailedRequest(selected, terms) ? "chip-error" : "chip-ok"
                     }
                   />
                 </div>
@@ -890,13 +1262,7 @@ function App() {
                   <Grid item xs={12} md={6}>
                     <Payload
                       title="Request body"
-                      value={
-                        selected._requestBody ||
-                        selected.request?.postData?.params
-                          ?.map((p) => `${p.name}=${p.value}`)
-                          .join("\n") ||
-                        "(No request body recorded)"
-                      }
+                      value={getRequestBody(selected) || "(No request body recorded)"}
                     />
                   </Grid>
                   <Grid item xs={12} md={6}>
@@ -962,7 +1328,11 @@ function App() {
 function Payload({ title, value }) {
   const [expanded, setExpanded] = useState(false);
   const [copyStatus, setCopyStatus] = useState("");
-  const text = asText(value);
+  const [showFormatted, setShowFormatted] = useState(true);
+  const rawText = asText(value);
+  const formattedText = formatPayload(value);
+  const isJson = formattedText !== rawText && ["{", "["].includes(rawText.trim()[0]);
+  const text = isJson && showFormatted ? formattedText : rawText;
   const handleCopy = async () => {
     try {
       await copyText(text);
@@ -977,6 +1347,26 @@ function Payload({ title, value }) {
     <div className={`payload ${expanded ? "payload-expanded" : ""}`}>
       <div className="payload-title">
         <Typography variant="subtitle2">{title}</Typography>
+        {isJson && (
+          <div className="payload-view-toggle" aria-label={`${title} display format`}>
+            <button
+              type="button"
+              className={!showFormatted ? "active" : ""}
+              aria-pressed={!showFormatted}
+              onClick={() => { setShowFormatted(false); setCopyStatus(""); }}
+            >
+              Raw
+            </button>
+            <button
+              type="button"
+              className={showFormatted ? "active" : ""}
+              aria-pressed={showFormatted}
+              onClick={() => { setShowFormatted(true); setCopyStatus(""); }}
+            >
+              Formatted
+            </button>
+          </div>
+        )}
         <Button
           size="small"
           aria-expanded={expanded}
