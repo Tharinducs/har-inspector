@@ -45,7 +45,7 @@ const classifyResource = (entry) => {
     entry.response?.content?.mimeType ||
     getHeader(entry.response?.headers, "content-type") || ""
   ).toLowerCase();
-  const url = String(entry.request?.url || "").toLower().split("?")[0];
+  const url = String(entry.request?.url || "").toLowerCase().split("?")[0];
   const ext = (url.match(/\.([a-z0-9]+)$/) || [])[1] || "";
   if (type === "JS") return "JavaScript";
   if (type === "Image") return "Image";
