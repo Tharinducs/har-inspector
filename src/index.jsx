@@ -6,6 +6,9 @@ import DeleteOutlineIcon from "@material-ui/icons/DeleteOutline";
 import CloudUploadIcon from "@material-ui/icons/CloudUpload";
 import SearchIcon from "@material-ui/icons/Search";
 import InsertDriveFileIcon from "@material-ui/icons/InsertDriveFile";
+import VirtualList from "react-tiny-virtual-list";
+import AutoSizer from "react-virtualized/dist/commonjs/AutoSizer";
+import VirtualizedList from "react-virtualized/dist/commonjs/List";
 import {
   AppBar,
   Toolbar,
@@ -36,7 +39,13 @@ const {
   isFailedRequest,
   parseHar,
 } = require("./harUtils");
-const { asText, formatPayload, getRequestBody } = require("./payloadUtils");
+const {
+  asText,
+  formatPayload,
+  getRequestBody,
+  getLineDiff,
+  getCharacterDiff,
+} = require("./payloadUtils");
 const { HISTORY_KEY, getSessionHistory, saveSessionHistory, clearSessionHistory } = require("./historyStorage");
 
 const DEFAULTS = {
@@ -102,6 +111,80 @@ const cleanExportEntry = (entry) => {
   };
 };
 
+  const normalizeJsonForDiff = (value, ignoreKeyOrder, ignoreArrayOrder) => {
+    const raw = asText(value);
+    try {
+      const parsed = JSON.parse(raw.trim());
+      const normalize = (item) => {
+        if (Array.isArray(item)) {
+          const normalized = item.map(normalize);
+          return ignoreArrayOrder
+            ? normalized.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))
+            : normalized;
+        }
+        if (item && typeof item === "object") {
+          const entries = Object.entries(item);
+          if (ignoreKeyOrder) entries.sort(([left], [right]) => left.localeCompare(right));
+          return Object.fromEntries(entries.map(([key, child]) => [key, normalize(child)]));
+        }
+        return item;
+      };
+      return JSON.stringify(normalize(parsed), null, 2);
+    } catch {
+      return raw;
+    }
+  };
+
+  const buildCurl = (entry) => {
+    const parts = [`curl '${String(entry.request?.url || entry._url || "").replace(/'/g, "'\\''")}'`];
+    if (entry.request?.method) parts[0] += ` \\\n  -X ${entry.request.method}`;
+    (entry.request?.headers || []).forEach((header) => {
+      parts.push(`  -H '${String(header.name)}: ${String(header.value).replace(/'/g, "'\\''")}'`);
+    });
+    const body = getRequestBody(entry);
+    if (body) parts.push(`  --data-raw '${String(body).replace(/'/g, "'\\''")}'`);
+    return parts.join(" \\\n");
+  };
+
+  function RequestRow({ entry, selected, comparing, compareLimitReached, terms, onSelect, onToggleCompare }) {
+    const duration = `${Number(entry._time || 0).toFixed(1)} ms`;
+    return (
+      <div className={`request-row-wrapper ${comparing ? "comparing" : ""}`}>
+        <input
+          type="checkbox"
+          className="request-compare-checkbox"
+          checked={comparing}
+          disabled={!comparing && compareLimitReached}
+          aria-label={`Select ${entry._method} ${entry._url} for comparison`}
+          title={compareLimitReached && !comparing ? "Two requests are already selected" : "Select for comparison"}
+          onChange={onToggleCompare}
+        />
+        <button
+          data-request-id={entry._id}
+          className={`request-row keyboard-row ${selected ? "selected" : ""}`}
+          onClick={onSelect}
+        >
+          <div className="row-main">
+            <span className={`method ${entry._method === "GET" ? "get" : "other-method"}`}>
+              {entry._method}
+            </span>
+            <span className="url" title={entry._url}>{entry._url}</span>
+            <span className={`status ${isFailedRequest(entry, terms) ? "failed-indicator" : entry._status >= 500 ? "s5" : entry._status >= 400 ? "s4" : entry._status >= 300 ? "s3" : entry._status >= 200 ? "s2" : "s0"}`}>
+              {entry._status || "ERR"}
+            </span>
+          </div>
+          <div className="row-meta">
+            <span>{entry._resource !== "Other" ? entry._resource : "Request"}</span>
+            <span>{duration}</span>
+            <span>
+              {entry.response?.content?.size ?? entry.response?.bodySize ?? "—"} bytes
+            </span>
+          </div>
+        </button>
+      </div>
+    );
+  }
+
 const downloadTextFile = (content, fileName, type) => {
   const blob = new Blob([content], { type });
   const url = URL.createObjectURL(blob);
@@ -166,6 +249,25 @@ function App() {
   const [resourceTypeFilter, setResourceTypeFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
   const [requestFiltersLoaded, setRequestFiltersLoaded] = useState(false);
+
+  useEffect(() => {
+    if (!entries.length) return undefined;
+    try {
+      const savedIds = JSON.parse(localStorage.getItem("harCompareIds") || "[]");
+      const validIds = savedIds.filter((id) => entries.some((entry) => entry._id === id));
+      if (validIds.length === 2 && compareIds.length === 0) setCompareIds(validIds);
+    } catch {
+      localStorage.removeItem("harCompareIds");
+    }
+  }, [entries]);
+
+  useEffect(() => {
+    if (compareIds.length === 2) {
+      localStorage.setItem("harCompareIds", JSON.stringify(compareIds));
+    } else if (compareIds.length === 0) {
+      localStorage.removeItem("harCompareIds");
+    }
+  }, [compareIds]);
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -524,6 +626,9 @@ function App() {
   const compareEntries = compareIds.map((id) => entries.find((e) => e._id === id)).filter(Boolean);
   const requestBodiesMatch = compareEntries.length === 2 &&
     getRequestBody(compareEntries[0]) === getRequestBody(compareEntries[1]);
+  const responseBodiesMatch = compareEntries.length === 2 &&
+    (compareEntries[0].response?.content?.text ?? "") ===
+      (compareEntries[1].response?.content?.text ?? "");
 
   const exportRequests = (format) => {
     const baseName = exportBaseName(fileName);
@@ -561,6 +666,12 @@ function App() {
         event.preventDefault();
         requestSearchRef.current?.focus();
         requestSearchRef.current?.select();
+        return;
+      }
+
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "c") {
+        event.preventDefault();
+        if (compareIds.length === 2) setCompareOpen(true);
         return;
       }
 
@@ -606,7 +717,7 @@ function App() {
 
     window.addEventListener("keydown", handleKeyboardNavigation);
     return () => window.removeEventListener("keydown", handleKeyboardNavigation);
-  }, [compareOpen, query, resourceQuery, selectedId, tab, visibleEntries]);
+  }, [compareIds, compareOpen, query, resourceQuery, selectedId, tab, visibleEntries]);
 
   const fmt = (n) => `${Number(n || 0).toFixed(1)} ms`;
 
@@ -1124,52 +1235,74 @@ function App() {
                 </Typography>
               </div>
               <div className="request-list">
-                {visibleEntries.map((e) => (
-                  <div
-                    key={e._id}
-                    className={`request-row-wrapper ${compareIds.includes(e._id) ? "comparing" : ""}`}
-                  >
-                    <input
-                      type="checkbox"
-                      className="request-compare-checkbox"
-                      checked={compareIds.includes(e._id)}
-                      aria-label={`Select ${e._method} ${e._url} for comparison`}
-                      title="Select for comparison"
-                      onChange={() => {
-                        setCompareIds((current) =>
-                          current.includes(e._id)
-                            ? current.filter((id) => id !== e._id)
-                            : current.length < 2
-                              ? [...current, e._id]
-                              : current,
-                        );
-                        setCompareOpen(false);
-                      }}
-                    />
-                    <button
-                      data-request-id={e._id}
-                      className={`request-row keyboard-row ${selectedId === e._id ? "selected" : ""}`}
-                      onClick={() => setSelectedId(e._id)}
-                    >
-                      <div className="row-main">
-                        <span className={`method ${e._method === "GET" ? "get" : "other-method"}`}>
-                          {e._method}
-                        </span>
-                        <span className="url" title={e._url}>{e._url}</span>
-                        <span className={`status ${isFailedRequest(e, terms) ? "failed-indicator" : e._status >= 500 ? "s5" : e._status >= 400 ? "s4" : e._status >= 300 ? "s3" : e._status >= 200 ? "s2" : "s0"}`}>
-                          {e._status || "ERR"}
-                        </span>
-                      </div>
-                      <div className="row-meta">
-                        <span>{e._resource !== "Other" ? e._resource : "Request"}</span>
-                        <span>{fmt(e._time)}</span>
-                        <span>
-                          {e.response?.content?.size ?? e.response?.bodySize ?? "—"} bytes
-                        </span>
-                      </div>
-                    </button>
-                  </div>
-                ))}
+                {visibleEntries.length > 0 && visibleEntries.length <= 1000 && (
+                  <VirtualList
+                    width="100%"
+                    height={530}
+                    itemCount={visibleEntries.length}
+                    itemSize={72}
+                    overscanCount={5}
+                    renderItem={({ index, style }) => {
+                      const entry = visibleEntries[index];
+                      return (
+                        <div key={entry._id} style={style}>
+                          <RequestRow
+                            entry={entry}
+                            selected={selectedId === entry._id}
+                            comparing={compareIds.includes(entry._id)}
+                            compareLimitReached={compareIds.length >= 2}
+                            terms={terms}
+                            onSelect={() => setSelectedId(entry._id)}
+                            onToggleCompare={() => {
+                              setCompareIds((current) =>
+                                current.includes(entry._id)
+                                  ? current.filter((id) => id !== entry._id)
+                                  : current.length < 2 ? [...current, entry._id] : current,
+                              );
+                              setCompareOpen(false);
+                            }}
+                          />
+                        </div>
+                      );
+                    }}
+                  />
+                )}
+                {visibleEntries.length > 1000 && (
+                  <AutoSizer disableHeight>
+                    {({ width }) => (
+                      <VirtualizedList
+                        width={width}
+                        height={530}
+                        rowCount={visibleEntries.length}
+                        rowHeight={72}
+                        overscanRowCount={5}
+                        rowRenderer={({ key, index, style }) => {
+                          const entry = visibleEntries[index];
+                          return (
+                            <div key={key} style={style}>
+                              <RequestRow
+                                entry={entry}
+                                selected={selectedId === entry._id}
+                                comparing={compareIds.includes(entry._id)}
+                                compareLimitReached={compareIds.length >= 2}
+                                terms={terms}
+                                onSelect={() => setSelectedId(entry._id)}
+                                onToggleCompare={() => {
+                                  setCompareIds((current) =>
+                                    current.includes(entry._id)
+                                      ? current.filter((id) => id !== entry._id)
+                                      : current.length < 2 ? [...current, entry._id] : current,
+                                  );
+                                  setCompareOpen(false);
+                                }}
+                              />
+                            </div>
+                          );
+                        }}
+                      />
+                    )}
+                  </AutoSizer>
+                )}
                 {!visibleEntries.length && (
                   <div className="no-results">No requests match these filters.</div>
                 )}
@@ -1191,8 +1324,13 @@ function App() {
                     Request bodies are <strong>{requestBodiesMatch ? "identical" : "different"}</strong>
                   </div>
                 )}
+                {compareEntries.length === 2 && (
+                  <div className={`comparison-body-status ${responseBodiesMatch ? "same" : "different"}`}>
+                    Response bodies are <strong>{responseBodiesMatch ? "identical" : "different"}</strong>
+                  </div>
+                )}
                 <div className="comparison-grid">
-                  {compareEntries.map((entry) => (
+                  {compareEntries.map((entry, entryIndex) => (
                     <div className="comparison-column" key={entry._id}>
                       <div className="comparison-summary">
                         <span className="method get">{entry._method}</span>
@@ -1205,14 +1343,25 @@ function App() {
                         </Typography>
                       </div>
                       <div className="comparison-request-body">
-                        <Payload
+                        <DiffPayload
                           title={`Request body${requestBodiesMatch ? " · Same" : " · Different"}`}
                           value={getRequestBody(entry) || "(No request body recorded)"}
+                          otherValue={getRequestBody(compareEntries[entryIndex === 0 ? 1 : 0]) || "(No request body recorded)"}
+                          side={entryIndex === 0 ? "left" : "right"}
+                          copyAdditional={buildCurl(entry)}
+                          copyAdditionalLabel="Copy cURL"
+                          syncGroup="request-body"
                         />
                       </div>
                       <Payload title="Request headers" value={entry.request?.headers?.map((h) => ({ [h.name]: h.value }))} />
                       <Payload title="Response headers" value={entry.response?.headers?.map((h) => ({ [h.name]: h.value }))} />
-                      <Payload title="Response body" value={entry.response?.content?.text ?? ""} />
+                      <DiffPayload
+                        title={`Response body${responseBodiesMatch ? " · Same" : " · Different"}`}
+                        value={entry.response?.content?.text ?? ""}
+                        otherValue={compareEntries[entryIndex === 0 ? 1 : 0].response?.content?.text ?? ""}
+                        side={entryIndex === 0 ? "left" : "right"}
+                        syncGroup="response-body"
+                      />
                     </div>
                   ))}
                 </div>
@@ -1388,6 +1537,247 @@ function Payload({ title, value }) {
         )}
       </div>
       <pre className={expanded ? "expanded" : ""}>{text}</pre>
+    </div>
+  );
+}
+
+function DiffPayload({ title, value, otherValue, side, copyAdditional, copyAdditionalLabel, syncGroup }) {
+  const [expanded, setExpanded] = useState(false);
+  const [copyStatus, setCopyStatus] = useState("");
+  const [curlCopyStatus, setCurlCopyStatus] = useState("");
+  const [showFormatted, setShowFormatted] = useState(true);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchCursor, setSearchCursor] = useState(-1);
+  const [changedOnly, setChangedOnly] = useState(false);
+  const [ignoreWhitespace, setIgnoreWhitespace] = useState(false);
+  const [ignoreKeyOrder, setIgnoreKeyOrder] = useState(false);
+  const [ignoreArrayOrder, setIgnoreArrayOrder] = useState(false);
+  const [synchronizeScroll, setSynchronizeScroll] = useState(true);
+  const syncingScrollRef = useRef(false);
+  const rawText = asText(value);
+  const formattedText = formatPayload(value);
+  const isJson = formattedText !== rawText && ["{", "["].includes(rawText.trim()[0]);
+  const text = isJson && showFormatted ? formattedText : rawText;
+
+  const otherRawText = asText(otherValue);
+  const otherFormattedText = formatPayload(otherValue);
+  const otherIsJson = otherFormattedText !== otherRawText &&
+    ["{", "["].includes(otherRawText.trim()[0]);
+  const otherText = isJson && otherIsJson && showFormatted ? otherFormattedText : otherRawText;
+  const comparisonText = ignoreKeyOrder || ignoreArrayOrder
+    ? normalizeJsonForDiff(text, ignoreKeyOrder, ignoreArrayOrder)
+    : ignoreWhitespace ? text.replace(/[^\S\r\n]+/g, "") : text;
+  const otherComparisonText = ignoreKeyOrder || ignoreArrayOrder
+    ? normalizeJsonForDiff(otherText, ignoreKeyOrder, ignoreArrayOrder)
+    : ignoreWhitespace ? otherText.replace(/[^\S\r\n]+/g, "") : otherText;
+  const diff = useMemo(
+    () => getLineDiff(
+      side === "left" ? comparisonText : otherComparisonText,
+      side === "left" ? otherComparisonText : comparisonText,
+    ),
+    [comparisonText, otherComparisonText, side],
+  );
+  const changedLines = side === "left"
+    ? diff.leftChanged
+    : diff.rightChanged;
+  const diffTypes = side === "left"
+    ? diff.leftTypes
+    : diff.rightTypes;
+  const lines = text.split("\n");
+  const changedLineList = [...changedLines].sort((a, b) => a - b);
+  const payloadRef = useRef(null);
+  const searchMatches = lines.reduce((matches, line, index) => {
+    if (searchQuery && line.toLowerCase().includes(searchQuery.toLowerCase())) matches.push(index);
+    return matches;
+  }, []);
+  const oppositeChangedLines = side === "left"
+    ? [...diff.rightChanged].sort((a, b) => a - b)
+    : [...diff.leftChanged].sort((a, b) => a - b);
+  const otherLines = otherText.split("\n");
+  const handleCopy = async () => {
+    try {
+      await copyText(text);
+      setCopyStatus("Copied");
+    } catch (error) {
+      setCopyStatus(`Copy failed: ${error.message || "Clipboard access is unavailable."}`);
+    }
+  };
+
+  const copyValue = async (content, label) => {
+    try {
+      await copyText(content);
+      setCopyStatus(label);
+    } catch (error) {
+      setCopyStatus(`Copy failed: ${error.message || "Clipboard access is unavailable."}`);
+    }
+  };
+
+  const copyCurl = async () => {
+    try {
+      await copyText(copyAdditional);
+      setCurlCopyStatus("Copied");
+      window.setTimeout(() => setCurlCopyStatus(""), 1500);
+    } catch (error) {
+      setCopyStatus(`Copy failed: ${error.message || "Clipboard access is unavailable."}`);
+    }
+  };
+
+  const navigateSearch = (direction) => {
+    if (!searchMatches.length) return;
+    const next = searchCursor < 0
+      ? (direction > 0 ? 0 : searchMatches.length - 1)
+      : (searchCursor + direction + searchMatches.length) % searchMatches.length;
+    setSearchCursor(next);
+    window.requestAnimationFrame(() => {
+      payloadRef.current
+        ?.querySelector(`[data-diff-line="${searchMatches[next]}"]`)
+        ?.scrollIntoView({ block: "center" });
+    });
+  };
+
+  const handleScroll = (event) => {
+    if (!synchronizeScroll || syncingScrollRef.current) return;
+    const source = event.currentTarget;
+    const maxScroll = source.scrollHeight - source.clientHeight;
+    const ratio = maxScroll > 0 ? source.scrollTop / maxScroll : 0;
+    syncingScrollRef.current = true;
+    document.querySelectorAll(`[data-sync-diff="${syncGroup}"]`).forEach((target) => {
+      if (target === source) return;
+      const targetMaxScroll = target.scrollHeight - target.clientHeight;
+      target.scrollTop = targetMaxScroll > 0 ? ratio * targetMaxScroll : 0;
+    });
+    window.requestAnimationFrame(() => {
+      syncingScrollRef.current = false;
+    });
+  };
+
+  const renderDiffLine = (line, index) => {
+    if (!changedLines.has(index)) return line || " ";
+    const changedIndex = changedLineList.indexOf(index);
+    const oppositeIndex = oppositeChangedLines[changedIndex];
+    if (oppositeIndex === undefined) return line || " ";
+    const characterDiff = getCharacterDiff(line, otherLines[oppositeIndex] || "");
+    const [middleStart, middleEnd] = side === "left"
+      ? characterDiff.leftMiddle
+      : characterDiff.rightMiddle;
+    return (
+      <>
+        {line.slice(0, middleStart)}
+        <mark className="diff-character-changed">{line.slice(middleStart, middleEnd) || " "}</mark>
+        {line.slice(middleEnd)}
+      </>
+    );
+  };
+
+  return (
+    <div className={`payload diff-payload ${expanded ? "payload-expanded" : ""}`}>
+      <div className="payload-title">
+        <Typography variant="subtitle2">{title}</Typography>
+        <TextField
+          className="diff-search"
+          size="small"
+          variant="outlined"
+          value={searchQuery}
+          placeholder="Find in body"
+          aria-label={`Find in ${title}`}
+          onChange={(event) => {
+            setSearchQuery(event.target.value);
+            setSearchCursor(-1);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") navigateSearch(event.shiftKey ? -1 : 1);
+          }}
+        />
+        {searchMatches.length > 0 && (
+          <div className="diff-search-navigation">
+            <Button size="small" onClick={() => navigateSearch(-1)}>Prev match</Button>
+            <Typography variant="caption">
+              {searchCursor < 0 ? searchMatches.length : `${searchCursor + 1}/${searchMatches.length}`}
+            </Typography>
+            <Button size="small" onClick={() => navigateSearch(1)}>Next match</Button>
+          </div>
+        )}
+        {isJson && (
+          <div className="payload-view-toggle" aria-label={`${title} display format`}>
+            <button type="button" className={!showFormatted ? "active" : ""} aria-pressed={!showFormatted} onClick={() => setShowFormatted(false)}>
+              Raw
+            </button>
+            <button type="button" className={showFormatted ? "active" : ""} aria-pressed={showFormatted} onClick={() => setShowFormatted(true)}>
+              Formatted
+            </button>
+          </div>
+        )}
+        <Button size="small" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>
+          {expanded ? "Collapse" : "Expand"}
+        </Button>
+        <Button size="small" onClick={handleCopy}>
+          {copyStatus === "Copied" ? "Copied" : "Copy"}
+        </Button>
+        {changedLineList.length > 0 && (
+          <Button size="small" onClick={() => copyValue(changedLineList.map((index) => lines[index]).join("\n"), "Changed lines copied")}>
+            Copy changed
+          </Button>
+        )}
+        {copyAdditional && (
+          <Button size="small" onClick={copyCurl}>
+            {curlCopyStatus || copyAdditionalLabel}
+          </Button>
+        )}
+        {copyStatus && copyStatus !== "Copied" && copyStatus !== "" && (
+          <Typography className={copyStatus.startsWith("Copy failed:") ? "payload-copy-error" : ""} variant="caption" role="status">
+            {copyStatus}
+          </Typography>
+        )}
+      </div>
+      <div className="diff-options">
+        <button type="button" className={changedOnly ? "active" : ""} aria-pressed={changedOnly} onClick={() => setChangedOnly(!changedOnly)}>
+          Changed lines only
+        </button>
+        <button type="button" className={ignoreWhitespace ? "active" : ""} aria-pressed={ignoreWhitespace} onClick={() => setIgnoreWhitespace(!ignoreWhitespace)}>
+          Ignore whitespace
+        </button>
+        {isJson && (
+          <>
+            <button type="button" className={ignoreKeyOrder ? "active" : ""} aria-pressed={ignoreKeyOrder} onClick={() => setIgnoreKeyOrder(!ignoreKeyOrder)}>
+              Ignore JSON key order
+            </button>
+            <button type="button" className={ignoreArrayOrder ? "active" : ""} aria-pressed={ignoreArrayOrder} onClick={() => setIgnoreArrayOrder(!ignoreArrayOrder)}>
+              Ignore array order
+            </button>
+          </>
+        )}
+      </div>
+      <button
+        type="button"
+        className={`sync-scroll-toggle ${synchronizeScroll ? "active" : ""}`}
+        aria-pressed={synchronizeScroll}
+        onClick={() => setSynchronizeScroll(!synchronizeScroll)}
+      >
+        Synchronized scrolling
+      </button>
+      <div className="diff-legend" aria-label="Difference legend">
+        <span className="diff-legend-added">Added { [...diffTypes.values()].filter((type) => type === "added").length }</span>
+        <span className="diff-legend-removed">Removed { [...diffTypes.values()].filter((type) => type === "removed").length }</span>
+        <span className="diff-legend-changed">Changed { [...diffTypes.values()].filter((type) => type === "changed").length }</span>
+      </div>
+      <pre
+        ref={payloadRef}
+        className={expanded ? "expanded" : ""}
+        data-sync-diff={syncGroup}
+        onScroll={handleScroll}
+      >
+        {lines.map((line, index) => changedOnly && !changedLines.has(index) ? null : (
+          <React.Fragment key={`${index}-${line}`}>
+            <span
+              data-diff-line={index}
+              className={`diff-line diff-${diffTypes.get(index) || "unchanged"} ${searchQuery && line.toLowerCase().includes(searchQuery.toLowerCase()) ? "diff-search-match" : ""}`}
+            >
+              {renderDiffLine(line, index)}
+            </span>
+            {index < lines.length - 1 ? "\n" : ""}
+          </React.Fragment>
+        ))}
+      </pre>
     </div>
   );
 }

@@ -575,8 +575,47 @@ body {
   color: #c43b49 !important;
 }
 .request-list {
+  height: 530px;
   max-height: 530px;
   overflow: auto;
+}
+.diff-search {
+  width: 150px;
+  margin-left: 4px !important;
+}
+.diff-search input {
+  padding: 5px 8px;
+  font-size: 12px;
+}
+.diff-search-navigation {
+  display: flex;
+  align-items: center;
+}
+.diff-search-match {
+  background: #fff3a3;
+  box-shadow: 0 0 0 2px #fff3a3;
+}
+.diff-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 7px 10px;
+  border-bottom: 1px solid #eef1f8;
+}
+.diff-options button {
+  border: 1px solid #d9deed;
+  border-radius: 12px;
+  background: #fff;
+  color: #596175;
+  cursor: pointer;
+  font: inherit;
+  font-size: 10px;
+  padding: 3px 8px;
+}
+.diff-options button.active {
+  border-color: #5966d8;
+  background: #edf0ff;
+  color: #3945a6;
 }
 .request-row-wrapper {
   position: relative;
@@ -665,6 +704,68 @@ body {
 .comparison-summary strong {
   width: 100%;
   overflow-wrap: anywhere;
+}
+.diff-payload pre {
+  line-height: 1.55;
+}
+.diff-line {
+  display: inline;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+.diff-changed, .diff-added, .diff-removed {
+  border-radius: 2px;
+}
+.diff-changed {
+  background: #ffe6a7;
+  box-shadow: 0 0 0 2px #ffe6a7;
+}
+.diff-added {
+  background: #d8f3dc;
+  box-shadow: 0 0 0 2px #d8f3dc;
+}
+.diff-removed {
+  background: #ffd8d8;
+  box-shadow: 0 0 0 2px #ffd8d8;
+}
+.diff-legend {
+  display: flex;
+  gap: 12px;
+  padding: 6px 10px;
+  border-bottom: 1px solid #eef1f8;
+  font-size: 10px;
+}
+.diff-legend span::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 4px;
+  border-radius: 2px;
+}
+.diff-legend-added::before { background: #2e7d32; }
+.diff-legend-removed::before { background: #c62828; }
+.diff-legend-changed::before { background: #ed9b32; }
+.diff-character-changed {
+  background: #ffc857;
+  color: inherit;
+  font-weight: 700;
+}
+.sync-scroll-toggle {
+  margin: 6px 10px;
+  border: 1px solid #d9deed;
+  border-radius: 12px;
+  background: #fff;
+  color: #596175;
+  cursor: pointer;
+  font: inherit;
+  font-size: 10px;
+  padding: 3px 8px;
+}
+.sync-scroll-toggle.active {
+  border-color: #5966d8;
+  background: #edf0ff;
+  color: #3945a6;
 }
 @media (max-width: 900px) {
   .request-compare-checkbox {
