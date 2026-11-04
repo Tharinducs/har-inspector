@@ -38,6 +38,8 @@ const {
   statusGroup,
   isFailedRequest,
   parseHar,
+  getEndpointKey,
+  getCommonEndpointKeys,
 } = require("./harUtils");
 const {
   asText,
@@ -238,6 +240,17 @@ function App() {
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [historyError, setHistoryError] = useState("");
   const [view, setView] = useState("analysis");
+  const [compareLeft, setCompareLeft] = useState([]);
+  const [compareRight, setCompareRight] = useState([]);
+  const [compareLeftName, setCompareLeftName] = useState("");
+  const [compareRightName, setCompareRightName] = useState("");
+  const [compareLeftId, setCompareLeftId] = useState(null);
+  const [compareRightId, setCompareRightId] = useState(null);
+  const [commonOnly, setCommonOnly] = useState(false);
+  const [compareLeftQuery, setCompareLeftQuery] = useState("");
+  const [compareRightQuery, setCompareRightQuery] = useState("");
+  const [compareSharedQuery, setCompareSharedQuery] = useState("");
+  const [separateComparisonSearch, setSeparateComparisonSearch] = useState(false);
 
   const [tab, setTab] = useState(0);
   const [selectedId, setSelectedId] = useState(null);
@@ -499,6 +512,36 @@ function App() {
     e.target.value = "";
   };
 
+  const onCompareFile = async (e, side) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setError("");
+    try {
+      setLoading(true);
+      setLoadingProgress(0);
+      setLoadingMessage(`Reading ${side === "left" ? "first" : "second"} HAR file...`);
+      const content = await file.text();
+      setLoadingMessage("Parsing requests...");
+      const parsed = await parseHar(content, setLoadingProgress);
+      if (side === "left") {
+        setCompareLeft(parsed);
+        setCompareLeftName(file.name);
+        setCompareLeftId(null);
+      } else {
+        setCompareRight(parsed);
+        setCompareRightName(file.name);
+        setCompareRightId(null);
+      }
+    } catch (compareError) {
+      setError(compareError.message || "Unable to parse this HAR file.");
+    } finally {
+      setLoading(false);
+      setLoadingProgress(0);
+      setLoadingMessage("");
+      e.target.value = "";
+    }
+  };
+
   const openHistoryItem = async (item) => {
     try {
       setLoading(true);
@@ -656,6 +699,29 @@ function App() {
   const resourceFailure = requestSummary.resourceFailure;
   const matches = { length: requestSummary.bodyMatches };
 
+  const commonEndpointKeys = useMemo(
+    () => getCommonEndpointKeys(compareLeft, compareRight),
+    [compareLeft, compareRight],
+  );
+  const filterCompareEntries = (entriesForSide, query, commonKeys) =>
+    entriesForSide.filter((entry) => {
+      if (commonOnly && !commonKeys.has(getEndpointKey(entry))) return false;
+      if (!query.trim()) return true;
+      const searchable = `${entry._method} ${entry._url} ${entry._status} ${entry._resource} ${entry._requestType}`;
+      return searchable.toLowerCase().includes(query.trim().toLowerCase());
+    });
+  const leftComparisonQuery = separateComparisonSearch ? compareLeftQuery : compareSharedQuery;
+  const rightComparisonQuery = separateComparisonSearch ? compareRightQuery : compareSharedQuery;
+  const visibleCompareLeft = filterCompareEntries(compareLeft, leftComparisonQuery, commonEndpointKeys);
+  const visibleCompareRight = filterCompareEntries(compareRight, rightComparisonQuery, commonEndpointKeys);
+  const compareLeftEntry = compareLeft.find((entry) => entry._id === compareLeftId);
+  const compareRightEntry = compareRight.find((entry) => entry._id === compareRightId);
+  const crossRequestBodiesMatch = Boolean(compareLeftEntry && compareRightEntry) &&
+    getRequestBody(compareLeftEntry) === getRequestBody(compareRightEntry);
+  const crossResponseBodiesMatch = Boolean(compareLeftEntry && compareRightEntry) &&
+    (compareLeftEntry.response?.content?.text ?? "") ===
+      (compareRightEntry.response?.content?.text ?? "");
+
   useEffect(() => {
     const handleKeyboardNavigation = (event) => {
       const target = event.target;
@@ -737,6 +803,15 @@ function App() {
             </Typography>
           </div>
           <div className="grow" />
+          <Button
+            className="settings-toggle"
+            onClick={() => {
+              setView(view === "compare" ? "analysis" : "compare");
+              setSettingsOpen(false);
+            }}
+          >
+            {view === "compare" ? "Back to analysis" : "Compare HARs"}
+          </Button>
           {settings.historyEnabled && (
             <Button
               className="settings-toggle"
@@ -759,7 +834,7 @@ function App() {
           )}
         </Toolbar>
       </AppBar>
-      <main className={`main ${view === "history" ? "history-mode" : ""}`}>
+      <main className={`main ${view === "history" ? "history-mode" : ""} ${view === "compare" ? "compare-mode" : ""}`}>
         {loading && (
           <div className="loading-banner" role="status" aria-live="polite">
             <div className="loading-banner-head">
@@ -827,6 +902,215 @@ function App() {
             <span>{deletedHistoryEntry.item.fileName} deleted</span>
             <Button size="small" onClick={undoDeleteHistoryItem}>Undo</Button>
           </div>
+        )}
+        {view === "compare" && (
+          <section className="compare-section">
+            <div className="compare-heading">
+              <div>
+                <Typography variant="h4">Compare two HAR files</Typography>
+                <Typography color="textSecondary">
+                  Load both captures, filter shared APIs, and compare selected requests.
+                </Typography>
+              </div>
+              {compareLeft.length > 0 && compareRight.length > 0 && (
+                <Chip
+                  className={commonOnly ? "common-filter-active" : ""}
+                  label={`Common APIs (${commonEndpointKeys.size})`}
+                  clickable
+                  color={commonOnly ? "primary" : "default"}
+                  onClick={() => setCommonOnly(!commonOnly)}
+                />
+              )}
+            </div>
+            {(compareLeft.length > 0 || compareRight.length > 0) && (
+              <div className="comparison-search-controls">
+                <FormControlLabel
+                  control={
+                    <Switch
+                      color="primary"
+                      checked={separateComparisonSearch}
+                      onChange={(event) => setSeparateComparisonSearch(event.target.checked)}
+                    />
+                  }
+                  label="Separate searches"
+                />
+              </div>
+            )}
+            {!separateComparisonSearch && (compareLeft.length > 0 || compareRight.length > 0) && (
+              <Paper className="compare-shared-search">
+                <TextField
+                  fullWidth
+                  size="small"
+                  variant="outlined"
+                  value={compareSharedQuery}
+                  onChange={(event) => setCompareSharedQuery(event.target.value)}
+                  placeholder="Search both HAR request lists..."
+                  inputProps={{ "aria-label": "Search both HAR request lists" }}
+                />
+                {compareSharedQuery && (
+                  <Button size="small" onClick={() => setCompareSharedQuery("")}>Clear</Button>
+                )}
+              </Paper>
+            )}
+
+            <div className="compare-upload-grid">
+              {[
+                ["left", compareLeft, compareLeftName],
+                ["right", compareRight, compareRightName],
+              ].map(([side, entriesForSide, name]) => (
+                <Paper className="panel compare-upload" key={side}>
+                  <div className="compare-upload-head">
+                    <div>
+                      <Typography variant="h6">{side === "left" ? "HAR 1" : "HAR 2"}</Typography>
+                      <Typography variant="caption" color="textSecondary">
+                        {name || (side === "left" ? "First capture" : "Second capture")}
+                      </Typography>
+                    </div>
+                    {entriesForSide.length > 0 && (
+                      <Chip size="small" label={`${entriesForSide.length} requests`} />
+                    )}
+                  </div>
+                  <input
+                    id={`compare-har-${side}`}
+                    type="file"
+                    accept=".har,application/json,application/har+json"
+                    onChange={(event) => onCompareFile(event, side)}
+                    hidden
+                  />
+                  <label htmlFor={`compare-har-${side}`}>
+                    <Button variant="outlined" color="primary" component="span">
+                      {entriesForSide.length ? "Replace file" : "Choose HAR file"}
+                    </Button>
+                  </label>
+                </Paper>
+              ))}
+            </div>
+
+            {(compareLeft.length > 0 || compareRight.length > 0) && (
+              <div className="compare-request-grid">
+                {[
+                  ["left", visibleCompareLeft, compareLeftId, setCompareLeftId, compareLeftName],
+                  ["right", visibleCompareRight, compareRightId, setCompareRightId, compareRightName],
+                ].map(([side, entriesForSide, selectedIdForSide, setSelectedIdForSide, name]) => (
+                  <Paper className="panel compare-request-panel" key={side}>
+                    <div className="compare-list-head">
+                      <Typography variant="subtitle1">{name || `HAR ${side === "left" ? 1 : 2}`}</Typography>
+                      <Typography variant="caption" color="textSecondary">
+                        {entriesForSide.length.toLocaleString()} shown
+                      </Typography>
+                    </div>
+                    {separateComparisonSearch && <div className="compare-list-search">
+                      <TextField
+                        fullWidth
+                        size="small"
+                        variant="outlined"
+                        value={side === "left" ? compareLeftQuery : compareRightQuery}
+                        onChange={(event) => {
+                          if (side === "left") setCompareLeftQuery(event.target.value);
+                          else setCompareRightQuery(event.target.value);
+                        }}
+                        placeholder="Search method, URL, status..."
+                        inputProps={{ "aria-label": `Search requests in ${name || `HAR ${side === "left" ? 1 : 2}`}` }}
+                      />
+                      {(side === "left" ? compareLeftQuery : compareRightQuery) && (
+                        <Button
+                          size="small"
+                          onClick={() => {
+                            if (side === "left") setCompareLeftQuery("");
+                            else setCompareRightQuery("");
+                          }}
+                        >
+                          Clear
+                        </Button>
+                      )}
+                    </div>}
+                    <div className="compare-request-list">
+                      {entriesForSide.map((entry) => (
+                        <button
+                          type="button"
+                          key={entry._id}
+                          className={`compare-request-row ${selectedIdForSide === entry._id ? "selected" : ""}`}
+                          onClick={() => setSelectedIdForSide(entry._id)}
+                        >
+                          <span className={`method ${entry._method === "GET" ? "get" : "other-method"}`}>
+                            {entry._method}
+                          </span>
+                          <span className="compare-request-url" title={entry._url}>{entry._url}</span>
+                          <span className={`status s${entry._status >= 500 ? 5 : entry._status >= 400 ? 4 : entry._status >= 300 ? 3 : entry._status >= 200 ? 2 : 0}`}>
+                            {entry._status || "ERR"}
+                          </span>
+                        </button>
+                      ))}
+                      {!entriesForSide.length && (
+                        <div className="no-results">
+                          {commonOnly && compareLeft.length && compareRight.length
+                            ? "No shared APIs match this filter."
+                            : "Upload a HAR file to see requests."}
+                        </div>
+                      )}
+                    </div>
+                  </Paper>
+                ))}
+              </div>
+            )}
+
+            {compareLeftEntry && compareRightEntry && (
+              <Paper className="panel comparison-panel cross-har-comparison">
+                <div className="detail-heading">
+                  <div>
+                    <Typography variant="h6">Selected request comparison</Typography>
+                    <Typography variant="caption" color="textSecondary">
+                      One request selected from each HAR file
+                    </Typography>
+                  </div>
+                  <Button size="small" onClick={() => {
+                    setCompareLeftId(null);
+                    setCompareRightId(null);
+                  }}>Clear selection</Button>
+                </div>
+                <div className={`comparison-body-status ${crossRequestBodiesMatch ? "same" : "different"}`}>
+                  Request bodies are <strong>{crossRequestBodiesMatch ? "identical" : "different"}</strong>
+                </div>
+                <div className={`comparison-body-status ${crossResponseBodiesMatch ? "same" : "different"}`}>
+                  Response bodies are <strong>{crossResponseBodiesMatch ? "identical" : "different"}</strong>
+                </div>
+                <div className="comparison-grid">
+                  {[compareLeftEntry, compareRightEntry].map((entry, entryIndex) => (
+                    <div className="comparison-column" key={entryIndex}>
+                      <div className="comparison-summary">
+                        <span className={`method ${entry._method === "GET" ? "get" : "other-method"}`}>{entry._method}</span>
+                        <span className={`status s${entry._status >= 500 ? 5 : entry._status >= 400 ? 4 : entry._status >= 300 ? 3 : entry._status >= 200 ? 2 : 0}`}>
+                          {entry._status || "ERR"}
+                        </span>
+                        <strong>{entry._url}</strong>
+                        <Typography variant="caption" color="textSecondary">
+                          {fmt(entry._time)} · {entry._resource}
+                        </Typography>
+                      </div>
+                      <div className="comparison-request-body">
+                        <DiffPayload
+                          title={`Request body${crossRequestBodiesMatch ? " · Same" : " · Different"}`}
+                          value={getRequestBody(entry) || "(No request body recorded)"}
+                          otherValue={getRequestBody(entryIndex === 0 ? compareRightEntry : compareLeftEntry) || "(No request body recorded)"}
+                          side={entryIndex === 0 ? "left" : "right"}
+                          syncGroup="cross-request-body"
+                        />
+                      </div>
+                      <Payload title="Request headers" value={entry.request?.headers?.map((header) => ({ [header.name]: header.value }))} />
+                      <Payload title="Response headers" value={entry.response?.headers?.map((header) => ({ [header.name]: header.value }))} />
+                      <DiffPayload
+                        title={`Response body${crossResponseBodiesMatch ? " · Same" : " · Different"}`}
+                        value={entry.response?.content?.text ?? ""}
+                        otherValue={(entryIndex === 0 ? compareRightEntry : compareLeftEntry).response?.content?.text ?? ""}
+                        side={entryIndex === 0 ? "left" : "right"}
+                        syncGroup="cross-response-body"
+                      />
+                    </div>
+                  ))}
+                </div>
+              </Paper>
+            )}
+          </section>
         )}
         <section className="intro">
           <div>

@@ -67,6 +67,32 @@ const hasFailureIndicator = (entry, terms = []) =>
 const isFailedRequest = (entry, terms = []) =>
   entry._status >= 400 || entry._status === 0 || hasFailureIndicator(entry, terms);
 
+const normalizeEndpointPath = (pathname) => pathname
+  .split("/")
+  .map((segment) => {
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(segment)) return "{uuid}";
+    if (/^\d+$/.test(segment) || /^[0-9a-f]{24}$/i.test(segment)) return "{id}";
+    return segment;
+  })
+  .join("/");
+
+const getEndpointKey = (entry) => {
+  try {
+    const url = new URL(entry.request?.url || entry._url || "");
+    const method = String(entry.request?.method || entry._method || "GET").toUpperCase();
+    const queryKeys = [...new Set([...new URLSearchParams(url.search).keys()].sort())];
+    return `${method} ${normalizeEndpointPath(url.pathname)}${queryKeys.length ? `?${queryKeys.join("&")}` : ""}`;
+  } catch {
+    const method = String(entry.request?.method || entry._method || "GET").toUpperCase();
+    return `${method} ${String(entry.request?.url || entry._url || "").split("?")[0]}`;
+  }
+};
+
+const getCommonEndpointKeys = (leftEntries, rightEntries) => {
+  const rightKeys = new Set(rightEntries.map(getEndpointKey));
+  return new Set(leftEntries.map(getEndpointKey).filter((key) => rightKeys.has(key)));
+};
+
 async function parseHar(raw, onProgress = () => {}) {
   const har = typeof raw === "string" ? JSON.parse(raw) : raw;
   const entries = har?.log?.entries;
@@ -104,5 +130,8 @@ module.exports = {
   statusGroup,
   hasFailureIndicator,
   isFailedRequest,
+  normalizeEndpointPath,
+  getEndpointKey,
+  getCommonEndpointKeys,
   parseHar,
 };

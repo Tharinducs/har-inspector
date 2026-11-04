@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { classifyRequestType, statusGroup, isFailedRequest } = require("./harUtils");
+const { classifyRequestType, statusGroup, isFailedRequest, getEndpointKey, getCommonEndpointKeys } = require("./harUtils");
 const {
   formatPayload,
   getRequestBody,
@@ -25,6 +25,13 @@ test("groups HTTP statuses into inspector buckets", () => {
 test("detects configured response failure markers", () => {
   assert.equal(isFailedRequest({ _status: 200, _body: "request failed: -ERR-invalid" }, ["-ERR-"]), true);
   assert.equal(isFailedRequest({ _status: 200, _body: "ok" }, ["-ERR-"]), false);
+});
+
+test("normalizes endpoints when finding APIs shared by two HAR files", () => {
+  const left = { request: { method: "GET", url: "https://api.example.com/users/123?include=profile&source=one" } };
+  const right = { request: { method: "GET", url: "https://staging.example.com/users/456?source=two&include=profile" } };
+  assert.equal(getEndpointKey(left), "GET /users/{id}?include&source");
+  assert.deepEqual([...getCommonEndpointKeys([left], [right])], ["GET /users/{id}?include&source"]);
 });
 
 test("formats JSON payloads and safely preserves malformed JSON", () => {
