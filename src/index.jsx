@@ -40,13 +40,22 @@ const {
   parseHar,
   getEndpointKey,
   getCommonEndpointKeys,
+  getComparisonStatus,
+  getPairedEntries,
+  getUrlHostnameCounts,
+  getHarWarnings,
+  getPerformanceSummary,
+  getDuplicateEndpoints,
+  redactSensitiveData,
 } = require("./harUtils");
 const {
   asText,
   formatPayload,
+  isJsonPayload,
   getRequestBody,
   getLineDiff,
   getCharacterDiff,
+  summarizeJsonDifferences,
 } = require("./payloadUtils");
 const { HISTORY_KEY, getSessionHistory, saveSessionHistory, clearSessionHistory } = require("./historyStorage");
 
@@ -148,8 +157,13 @@ const cleanExportEntry = (entry) => {
     return parts.join(" \\\n");
   };
 
-  function RequestRow({ entry, selected, comparing, compareLimitReached, terms, onSelect, onToggleCompare }) {
-    const duration = `${Number(entry._time || 0).toFixed(1)} ms`;
+  function RequestRow({ entry, selected, comparing, compareLimitReached, terms, maxVisibleTime, onSelect, onToggleCompare }) {
+    const time = Number(entry._time || 0);
+    const duration = `${time.toFixed(1)} ms`;
+    const timingWidth = maxVisibleTime > 0
+      ? Math.max(time > 0 ? 4 : 0, Math.min(100, (time / maxVisibleTime) * 100))
+      : 0;
+    const isSlow = time > 0 && time >= 500 && time >= maxVisibleTime * 0.75;
     return (
       <div className={`request-row-wrapper ${comparing ? "comparing" : ""}`}>
         <input
@@ -177,7 +191,12 @@ const cleanExportEntry = (entry) => {
           </div>
           <div className="row-meta">
             <span>{entry._resource !== "Other" ? entry._resource : "Request"}</span>
-            <span>{duration}</span>
+            <span className={`timing${isSlow ? " slow" : ""}`} title={isSlow ? "Slow request" : duration}>
+              <span className="timing-duration">{duration}</span>
+              <span className="timing-track" aria-hidden="true">
+                <span style={{ width: `${timingWidth}%` }} />
+              </span>
+            </span>
             <span>
               {entry.response?.content?.size ?? entry.response?.bodySize ?? "—"} bytes
             </span>
@@ -251,6 +270,11 @@ function App() {
   const [compareRightQuery, setCompareRightQuery] = useState("");
   const [compareSharedQuery, setCompareSharedQuery] = useState("");
   const [separateComparisonSearch, setSeparateComparisonSearch] = useState(false);
+  const [comparisonStatusFilter, setComparisonStatusFilter] = useState("all");
+  const [comparisonIgnoreQuery, setComparisonIgnoreQuery] = useState(true);
+  const [comparisonIgnoreIds, setComparisonIgnoreIds] = useState(true);
+  const [comparisonMaskSensitive, setComparisonMaskSensitive] = useState(false);
+  const [comparisonInsightsOpen, setComparisonInsightsOpen] = useState(false);
 
   const [tab, setTab] = useState(0);
   const [selectedId, setSelectedId] = useState(null);
@@ -261,6 +285,7 @@ function App() {
   const [resourceQuery, setResourceQuery] = useState("");
   const [resourceTypeFilter, setResourceTypeFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [requestSort, setRequestSort] = useState("original");
   const [requestFiltersLoaded, setRequestFiltersLoaded] = useState(false);
 
   useEffect(() => {
@@ -310,6 +335,11 @@ function App() {
         setResourceQuery(savedFilters.resourceQuery || "");
         setResourceTypeFilter(savedFilters.resourceTypeFilter || "all");
         setStatusFilter(savedFilters.statusFilter || "all");
+        setRequestSort(["original", "slowest", "fastest"].includes(savedFilters.requestSort)
+          ? savedFilters.requestSort
+          : "original");
+        setComparisonIgnoreQuery(savedFilters.comparisonIgnoreQuery !== false);
+        setComparisonIgnoreIds(savedFilters.comparisonIgnoreIds !== false);
       }
       setRequestFiltersLoaded(true);
       setSettingsLoaded(true);
@@ -327,6 +357,9 @@ function App() {
           resourceQuery,
           resourceTypeFilter,
           statusFilter,
+          requestSort,
+          comparisonIgnoreQuery,
+          comparisonIgnoreIds,
         },
       });
     }, 150);
@@ -339,6 +372,9 @@ function App() {
     resourceQuery,
     resourceTypeFilter,
     statusFilter,
+    requestSort,
+    comparisonIgnoreQuery,
+    comparisonIgnoreIds,
   ]);
 
   useEffect(() => {
@@ -384,6 +420,7 @@ function App() {
     setResourceQuery("");
     setResourceTypeFilter("all");
     setStatusFilter("all");
+    setRequestSort("original");
   };
 
   const hasActiveRequestFilters =
@@ -392,7 +429,8 @@ function App() {
     !!query.trim() ||
     !!resourceQuery.trim() ||
     resourceTypeFilter !== "all" ||
-    statusFilter !== "all";
+    statusFilter !== "all" ||
+    requestSort !== "original";
 
   const deleteHistoryItem = async (itemId) => {
     const deletedIndex = history.findIndex((item) => item.id === itemId);
@@ -479,6 +517,9 @@ function App() {
       };
 
       clearRequestFilters();
+      localStorage.removeItem("harCompareIds");
+      setCompareIds([]);
+      setCompareOpen(false);
       setEntries(parsed);
       setFileName(file.name);
       setSelectedId(parsed[0]?._id ?? null);
@@ -549,6 +590,9 @@ function App() {
       setLoadingMessage("Loading saved HAR...");
       const parsed = await parseHar(item.content, setLoadingProgress);
       clearRequestFilters();
+      localStorage.removeItem("harCompareIds");
+      setCompareIds([]);
+      setCompareOpen(false);
       setEntries(parsed);
       setFileName(item.fileName);
       setSelectedId(parsed[0]?._id ?? null);
@@ -597,9 +641,8 @@ function App() {
     return counts;
   }, [entries]);
 
-  const visibleEntries = useMemo(
-    () =>
-      entries.filter((e) => {
+  const visibleEntries = useMemo(() => {
+    const filteredEntries = entries.filter((e) => {
         const group = statusGroup(e._status);
         if (group === "200" && !settings.show200) return false;
         if (group === "30x" && !settings.show30x) return false;
@@ -661,9 +704,26 @@ function App() {
         )
           return false;
         return true;
-      }),
-    [entries, settings, filter, query, resourceQuery, tab, resourceTypeFilter, statusFilter],
+      });
+    if (requestSort === "slowest") {
+      return [...filteredEntries].sort((left, right) => right._time - left._time);
+    }
+    if (requestSort === "fastest") {
+      return [...filteredEntries].sort((left, right) => left._time - right._time);
+    }
+    return filteredEntries;
+  },
+    [entries, settings, filter, query, resourceQuery, tab, resourceTypeFilter, statusFilter, requestSort],
   );
+
+  const maxVisibleTime = visibleEntries.reduce(
+    (maximum, entry) => Math.max(maximum, Number(entry._time || 0)),
+    0,
+  );
+  const selectRequest = (id) => {
+    setSelectedId(id);
+    setCompareOpen(false);
+  };
 
   const selected = entries.find((e) => e._id === selectedId);
   const compareEntries = compareIds.map((id) => entries.find((e) => e._id === id)).filter(Boolean);
@@ -694,18 +754,41 @@ function App() {
       "application/json;charset=utf-8",
     );
   };
+  const exportComparisonReport = () => {
+    const report = {
+      generatedAt: new Date().toISOString(),
+      files: { left: compareLeftName, right: compareRightName },
+      summary: { left: comparisonSummaryLeft, right: comparisonSummaryRight },
+      warnings: comparisonWarnings,
+      domains: comparisonDomains.map(([hostname, count]) => ({ hostname, requests: count })),
+      pairedRequests: pairedEntries.map(([left, right]) => ({
+        left: comparisonMaskSensitive ? redactSensitiveData(left._url) : left._url,
+        right: comparisonMaskSensitive ? redactSensitiveData(right._url) : right._url,
+        status: getComparisonStatus(left, compareLeft, "left", compareRight, comparisonEndpointOptions),
+      })),
+    };
+    downloadTextFile(
+      JSON.stringify(report, null, 2),
+      "har-comparison-report.json",
+      "application/json;charset=utf-8",
+    );
+  };
   const count = (group) => requestSummary.counts[group] || 0;
   const resourceSuccess = requestSummary.resourceSuccess;
   const resourceFailure = requestSummary.resourceFailure;
   const matches = { length: requestSummary.bodyMatches };
 
+  const comparisonEndpointOptions = {
+    ignoreQueryValues: comparisonIgnoreQuery,
+    ignoreIds: comparisonIgnoreIds,
+  };
   const commonEndpointKeys = useMemo(
-    () => getCommonEndpointKeys(compareLeft, compareRight),
-    [compareLeft, compareRight],
+    () => getCommonEndpointKeys(compareLeft, compareRight, comparisonEndpointOptions),
+    [compareLeft, compareRight, comparisonIgnoreQuery, comparisonIgnoreIds],
   );
   const filterCompareEntries = (entriesForSide, query, commonKeys) =>
     entriesForSide.filter((entry) => {
-      if (commonOnly && !commonKeys.has(getEndpointKey(entry))) return false;
+      if (commonOnly && !commonKeys.has(getEndpointKey(entry, comparisonEndpointOptions))) return false;
       if (!query.trim()) return true;
       const searchable = `${entry._method} ${entry._url} ${entry._status} ${entry._resource} ${entry._requestType}`;
       return searchable.toLowerCase().includes(query.trim().toLowerCase());
@@ -714,6 +797,23 @@ function App() {
   const rightComparisonQuery = separateComparisonSearch ? compareRightQuery : compareSharedQuery;
   const visibleCompareLeft = filterCompareEntries(compareLeft, leftComparisonQuery, commonEndpointKeys);
   const visibleCompareRight = filterCompareEntries(compareRight, rightComparisonQuery, commonEndpointKeys);
+  const filteredCompareLeft = comparisonStatusFilter === "all"
+    ? visibleCompareLeft
+    : visibleCompareLeft.filter((entry) =>
+      getComparisonStatus(entry, compareLeft, "left", compareRight, comparisonEndpointOptions) === comparisonStatusFilter,
+    );
+  const filteredCompareRight = comparisonStatusFilter === "all"
+    ? visibleCompareRight
+    : visibleCompareRight.filter((entry) =>
+      getComparisonStatus(entry, compareRight, "right", compareLeft, comparisonEndpointOptions) === comparisonStatusFilter,
+    );
+  const pairedEntries = getPairedEntries(compareLeft, compareRight, comparisonEndpointOptions);
+  const findPairedEntry = (entry, side) => {
+    const pair = pairedEntries.find(([left, right]) =>
+      side === "left" ? left === entry : right === entry,
+    );
+    return pair ? (side === "left" ? pair[1] : pair[0]) : null;
+  };
   const compareLeftEntry = compareLeft.find((entry) => entry._id === compareLeftId);
   const compareRightEntry = compareRight.find((entry) => entry._id === compareRightId);
   const crossRequestBodiesMatch = Boolean(compareLeftEntry && compareRightEntry) &&
@@ -721,6 +821,17 @@ function App() {
   const crossResponseBodiesMatch = Boolean(compareLeftEntry && compareRightEntry) &&
     (compareLeftEntry.response?.content?.text ?? "") ===
       (compareRightEntry.response?.content?.text ?? "");
+  const crossJsonChanges = compareLeftEntry && compareRightEntry
+    ? summarizeJsonDifferences(
+      compareLeftEntry.response?.content?.text ?? "",
+      compareRightEntry.response?.content?.text ?? "",
+    )
+    : [];
+  const comparisonSummaryLeft = getPerformanceSummary(compareLeft);
+  const comparisonSummaryRight = getPerformanceSummary(compareRight);
+  const comparisonWarnings = getHarWarnings([...compareLeft, ...compareRight]);
+  const comparisonDomains = getUrlHostnameCounts([...compareLeft, ...compareRight]);
+  const comparisonDuplicates = getDuplicateEndpoints([...compareLeft, ...compareRight], comparisonEndpointOptions);
 
   useEffect(() => {
     const handleKeyboardNavigation = (event) => {
@@ -773,6 +884,7 @@ function App() {
           : Math.max(0, Math.min(visibleEntries.length - 1, currentIndex + direction));
         const nextEntry = visibleEntries[nextIndex];
         setSelectedId(nextEntry._id);
+        setCompareOpen(false);
         window.requestAnimationFrame(() => {
           document.querySelector(`[data-request-id="${nextEntry._id}"]`)?.scrollIntoView({
             block: "nearest",
@@ -934,6 +1046,18 @@ function App() {
                   }
                   label="Separate searches"
                 />
+                <FormControlLabel
+                  control={<Switch color="primary" checked={comparisonIgnoreQuery} onChange={(event) => setComparisonIgnoreQuery(event.target.checked)} />}
+                  label="Ignore query values"
+                />
+                <FormControlLabel
+                  control={<Switch color="primary" checked={comparisonIgnoreIds} onChange={(event) => setComparisonIgnoreIds(event.target.checked)} />}
+                  label="Ignore dynamic IDs"
+                />
+                <FormControlLabel
+                  control={<Switch color="primary" checked={comparisonMaskSensitive} onChange={(event) => setComparisonMaskSensitive(event.target.checked)} />}
+                  label="Mask sensitive data"
+                />
               </div>
             )}
             {!separateComparisonSearch && (compareLeft.length > 0 || compareRight.length > 0) && (
@@ -952,6 +1076,27 @@ function App() {
                 )}
               </Paper>
             )}
+            {(compareLeft.length > 0 || compareRight.length > 0) && (
+              <div className="comparison-status-pills" role="group" aria-label="Filter comparison status">
+                {[
+                  ["all", "All", Math.max(compareLeft.length, compareRight.length)],
+                  ["changed", "Changed", compareLeft.filter((entry) => getComparisonStatus(entry, compareLeft, "left", compareRight, comparisonEndpointOptions) === "changed").length],
+                  ["unchanged", "Unchanged", compareLeft.filter((entry) => getComparisonStatus(entry, compareLeft, "left", compareRight, comparisonEndpointOptions) === "unchanged").length],
+                  ["added", "Added", compareRight.filter((entry) => getComparisonStatus(entry, compareRight, "right", compareLeft, comparisonEndpointOptions) === "added").length],
+                  ["removed", "Removed", compareLeft.filter((entry) => getComparisonStatus(entry, compareLeft, "left", compareRight, comparisonEndpointOptions) === "removed").length],
+                ].map(([value, label, count]) => (
+                  <button
+                    type="button"
+                    key={value}
+                    className={comparisonStatusFilter === value ? `active comparison-${value}` : `comparison-${value}`}
+                    aria-pressed={comparisonStatusFilter === value}
+                    onClick={() => setComparisonStatusFilter(value)}
+                  >
+                    {label} <span>{count}</span>
+                  </button>
+                ))}
+              </div>
+            )}
 
             <div className="compare-upload-grid">
               {[
@@ -959,6 +1104,26 @@ function App() {
                 ["right", compareRight, compareRightName],
               ].map(([side, entriesForSide, name]) => (
                 <Paper className="panel compare-upload" key={side}>
+                  <div
+                    className={`compare-upload-dropzone ${entriesForSide.length ? "has-file" : ""}`}
+                    onDragOver={(event) => {
+                      event.preventDefault();
+                      event.currentTarget.classList.add("dragging");
+                    }}
+                    onDragLeave={(event) => event.currentTarget.classList.remove("dragging")}
+                    onDrop={(event) => {
+                      event.preventDefault();
+                      event.currentTarget.classList.remove("dragging");
+                      const file = event.dataTransfer.files?.[0];
+                      if (!file) return;
+                      const input = document.getElementById(`compare-har-${side}`);
+                      if (!input) return;
+                      const dataTransfer = new DataTransfer();
+                      dataTransfer.items.add(file);
+                      input.files = dataTransfer.files;
+                      input.dispatchEvent(new Event("change", { bubbles: true }));
+                    }}
+                  >
                   <div className="compare-upload-head">
                     <div>
                       <Typography variant="h6">{side === "left" ? "HAR 1" : "HAR 2"}</Typography>
@@ -982,15 +1147,87 @@ function App() {
                       {entriesForSide.length ? "Replace file" : "Choose HAR file"}
                     </Button>
                   </label>
+                  </div>
                 </Paper>
               ))}
             </div>
 
             {(compareLeft.length > 0 || compareRight.length > 0) && (
+              (!compareLeftEntry || !compareRightEntry) && (
+                <div className="comparison-selection-hint" role="status">
+                  <strong>
+                    {Number(Boolean(compareLeftEntry)) + Number(Boolean(compareRightEntry))}/2 selected
+                  </strong>
+                  <span>Select one request from each HAR file to compare them side by side.</span>
+                </div>
+              )
+            )}
+            {(compareLeft.length > 0 || compareRight.length > 0) && (
+              <div className={`comparison-insights-panel ${comparisonInsightsOpen ? "open" : "closed"}`}>
+                <button
+                  type="button"
+                  className="comparison-insights-toggle"
+                  aria-expanded={comparisonInsightsOpen}
+                  onClick={() => setComparisonInsightsOpen(!comparisonInsightsOpen)}
+                >
+                  <span>
+                    <Typography variant="subtitle1">Comparison insights</Typography>
+                    <Typography variant="caption" color="textSecondary">
+                      Performance, domains, duplicates, and HAR warnings
+                    </Typography>
+                  </span>
+                  <span>{comparisonInsightsOpen ? "Collapse" : "Expand"}</span>
+                </button>
+                {comparisonInsightsOpen && <div className="comparison-insights">
+                <Paper className="panel comparison-performance">
+                  <Typography variant="subtitle1">Performance summary</Typography>
+                  <div className="performance-columns">
+                    {[["HAR 1", comparisonSummaryLeft], ["HAR 2", comparisonSummaryRight]].map(([name, summary]) => (
+                      <div key={name}>
+                        <strong>{name}</strong>
+                        <span>{summary.totalDuration.toFixed(1)} ms total</span>
+                        <span>{summary.totalSize.toLocaleString()} bytes</span>
+                        <small>{summary.slowest.length ? `${summary.slowest[0].url} · ${summary.slowest[0].time.toFixed(1)} ms` : ""}</small>
+                      </div>
+                    ))}
+                  </div>
+                </Paper>
+                <Paper className="panel comparison-domains">
+                  <Typography variant="subtitle1">Domains</Typography>
+                  {comparisonDomains.slice(0, 6).map(([hostname, count]) => (
+                    <div key={hostname}><span>{hostname}</span><b>{count}</b></div>
+                  ))}
+                </Paper>
+                <Paper className="panel comparison-warnings">
+                  <Typography variant="subtitle1">HAR warnings ({comparisonWarnings.length})</Typography>
+                  {comparisonWarnings.slice(0, 4).map((warning, index) => (
+                    <div key={`${warning.type}-${warning.index}-${index}`}>
+                      <span>{warning.type}</span>{warning.message}
+                    </div>
+                  ))}
+                  {!comparisonWarnings.length && <small>No validation issues detected.</small>}
+                </Paper>
+                <Paper className="panel comparison-duplicates">
+                  <Typography variant="subtitle1">Duplicates ({comparisonDuplicates.length})</Typography>
+                  {comparisonDuplicates.slice(0, 5).map(([key, entriesForKey]) => (
+                    <div key={key}>
+                      <span title={key}>{key}</span><b>{entriesForKey.length}</b>
+                    </div>
+                  ))}
+                  {!comparisonDuplicates.length && <small>No duplicate endpoints detected.</small>}
+                </Paper>
+                <Button className="comparison-export-button" variant="outlined" size="small" onClick={exportComparisonReport}>
+                  Export comparison JSON
+                </Button>
+                </div>}
+              </div>
+            )}
+
+            {(compareLeft.length > 0 || compareRight.length > 0) && (
               <div className="compare-request-grid">
                 {[
-                  ["left", visibleCompareLeft, compareLeftId, setCompareLeftId, compareLeftName],
-                  ["right", visibleCompareRight, compareRightId, setCompareRightId, compareRightName],
+                  ["left", filteredCompareLeft, compareLeftId, setCompareLeftId, compareLeftName],
+                  ["right", filteredCompareRight, compareRightId, setCompareRightId, compareRightName],
                 ].map(([side, entriesForSide, selectedIdForSide, setSelectedIdForSide, name]) => (
                   <Paper className="panel compare-request-panel" key={side}>
                     <div className="compare-list-head">
@@ -1030,7 +1267,14 @@ function App() {
                           type="button"
                           key={entry._id}
                           className={`compare-request-row ${selectedIdForSide === entry._id ? "selected" : ""}`}
-                          onClick={() => setSelectedIdForSide(entry._id)}
+                          onClick={() => {
+                            setSelectedIdForSide(entry._id);
+                            const counterpart = findPairedEntry(entry, side);
+                            if (counterpart) {
+                              if (side === "left") setCompareRightId(counterpart._id);
+                              else setCompareLeftId(counterpart._id);
+                            }
+                          }}
                         >
                           <span className={`method ${entry._method === "GET" ? "get" : "other-method"}`}>
                             {entry._method}
@@ -1038,6 +1282,9 @@ function App() {
                           <span className="compare-request-url" title={entry._url}>{entry._url}</span>
                           <span className={`status s${entry._status >= 500 ? 5 : entry._status >= 400 ? 4 : entry._status >= 300 ? 3 : entry._status >= 200 ? 2 : 0}`}>
                             {entry._status || "ERR"}
+                          </span>
+                          <span className={`comparison-status comparison-status-${getComparisonStatus(entry, side === "left" ? compareLeft : compareRight, side, side === "left" ? compareRight : compareLeft, comparisonEndpointOptions)}`}>
+                            {getComparisonStatus(entry, side === "left" ? compareLeft : compareRight, side, side === "left" ? compareRight : compareLeft, comparisonEndpointOptions)}
                           </span>
                         </button>
                       ))}
@@ -1063,10 +1310,38 @@ function App() {
                       One request selected from each HAR file
                     </Typography>
                   </div>
+                  <div>
+                    {pairedEntries.length > 1 && (
+                      <>
+                        <Button size="small" onClick={() => {
+                          const index = pairedEntries.findIndex(([left, right]) => left === compareLeftEntry || right === compareRightEntry);
+                          const [left, right] = pairedEntries[Math.max(0, index - 1)];
+                          setCompareLeftId(left._id);
+                          setCompareRightId(right._id);
+                        }}>Previous pair</Button>
+                        <Button size="small" onClick={() => {
+                          const index = pairedEntries.findIndex(([left, right]) => left === compareLeftEntry || right === compareRightEntry);
+                          const [left, right] = pairedEntries[Math.min(pairedEntries.length - 1, index + 1)];
+                          setCompareLeftId(left._id);
+                          setCompareRightId(right._id);
+                        }}>Next pair</Button>
+                      </>
+                    )}
                   <Button size="small" onClick={() => {
                     setCompareLeftId(null);
                     setCompareRightId(null);
                   }}>Clear selection</Button>
+                  </div>
+                </div>
+                <div className="cross-request-summary">
+                  {[compareLeftEntry, compareRightEntry].map((entry, index) => (
+                    <div key={index}>
+                      <strong>{index === 0 ? compareLeftName : compareRightName}</strong>
+                      <span>Status {entry._status || "ERR"}</span>
+                      <span>{Number(entry._time || 0).toFixed(1)} ms</span>
+                      <span>{Number(entry.response?.content?.size || entry.response?.bodySize || 0).toLocaleString()} bytes</span>
+                    </div>
+                  ))}
                 </div>
                 <div className={`comparison-body-status ${crossRequestBodiesMatch ? "same" : "different"}`}>
                   Request bodies are <strong>{crossRequestBodiesMatch ? "identical" : "different"}</strong>
@@ -1074,6 +1349,17 @@ function App() {
                 <div className={`comparison-body-status ${crossResponseBodiesMatch ? "same" : "different"}`}>
                   Response bodies are <strong>{crossResponseBodiesMatch ? "identical" : "different"}</strong>
                 </div>
+                {crossJsonChanges.length > 0 && (
+                  <div className="json-change-summary">
+                    <Typography variant="subtitle2">JSON field changes ({crossJsonChanges.length})</Typography>
+                    {crossJsonChanges.map((change) => (
+                      <div key={`${change.type}-${change.path}`} className={`json-change json-change-${change.type}`}>
+                        <strong>{change.type}</strong>
+                        <code>{change.path}</code>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 <div className="comparison-grid">
                   {[compareLeftEntry, compareRightEntry].map((entry, entryIndex) => (
                     <div className="comparison-column" key={entryIndex}>
@@ -1090,18 +1376,22 @@ function App() {
                       <div className="comparison-request-body">
                         <DiffPayload
                           title={`Request body${crossRequestBodiesMatch ? " · Same" : " · Different"}`}
-                          value={getRequestBody(entry) || "(No request body recorded)"}
-                          otherValue={getRequestBody(entryIndex === 0 ? compareRightEntry : compareLeftEntry) || "(No request body recorded)"}
+                          value={comparisonMaskSensitive ? redactSensitiveData(getRequestBody(entry)) : getRequestBody(entry) || "(No request body recorded)"}
+                          otherValue={comparisonMaskSensitive ? redactSensitiveData(getRequestBody(entryIndex === 0 ? compareRightEntry : compareLeftEntry)) : getRequestBody(entryIndex === 0 ? compareRightEntry : compareLeftEntry) || "(No request body recorded)"}
                           side={entryIndex === 0 ? "left" : "right"}
                           syncGroup="cross-request-body"
                         />
                       </div>
-                      <Payload title="Request headers" value={entry.request?.headers?.map((header) => ({ [header.name]: header.value }))} />
-                      <Payload title="Response headers" value={entry.response?.headers?.map((header) => ({ [header.name]: header.value }))} />
+                      <Payload title="Request headers" value={entry.request?.headers?.map((header) => ({
+                        [header.name]: comparisonMaskSensitive ? redactSensitiveData(header.value) : header.value,
+                      }))} />
+                      <Payload title="Response headers" value={entry.response?.headers?.map((header) => ({
+                        [header.name]: comparisonMaskSensitive ? redactSensitiveData(header.value) : header.value,
+                      }))} />
                       <DiffPayload
                         title={`Response body${crossResponseBodiesMatch ? " · Same" : " · Different"}`}
-                        value={entry.response?.content?.text ?? ""}
-                        otherValue={(entryIndex === 0 ? compareRightEntry : compareLeftEntry).response?.content?.text ?? ""}
+                        value={comparisonMaskSensitive ? redactSensitiveData(entry.response?.content?.text ?? "") : entry.response?.content?.text ?? ""}
+                        otherValue={comparisonMaskSensitive ? redactSensitiveData((entryIndex === 0 ? compareRightEntry : compareLeftEntry).response?.content?.text ?? "") : (entryIndex === 0 ? compareRightEntry : compareLeftEntry).response?.content?.text ?? ""}
                         side={entryIndex === 0 ? "left" : "right"}
                         syncGroup="cross-response-body"
                       />
@@ -1208,7 +1498,7 @@ function App() {
             </Grid>
           </Paper>
         )}
-        {error && <Paper className="error-box">{error}</Paper>}
+        {error && <Paper className="error-box" role="alert">{error}</Paper>}
         {historyError && (
           <Paper className="error-box" role="alert">
             {historyError}
@@ -1463,6 +1753,22 @@ function App() {
                     )}
                   </Select>
                 </FormControl>
+                <FormControl
+                  variant="outlined"
+                  size="small"
+                  className="status-select timing-sort-select"
+                >
+                  <InputLabel>Timing</InputLabel>
+                  <Select
+                    value={requestSort}
+                    onChange={(e) => setRequestSort(e.target.value)}
+                    label="Timing"
+                  >
+                    <MenuItem value="original">Original order</MenuItem>
+                    <MenuItem value="slowest">Slowest first</MenuItem>
+                    <MenuItem value="fastest">Fastest first</MenuItem>
+                  </Select>
+                </FormControl>
                 {hasActiveRequestFilters && (
                   <Button
                     size="small"
@@ -1536,7 +1842,8 @@ function App() {
                             comparing={compareIds.includes(entry._id)}
                             compareLimitReached={compareIds.length >= 2}
                             terms={terms}
-                            onSelect={() => setSelectedId(entry._id)}
+                            maxVisibleTime={maxVisibleTime}
+                            onSelect={() => selectRequest(entry._id)}
                             onToggleCompare={() => {
                               setCompareIds((current) =>
                                 current.includes(entry._id)
@@ -1570,7 +1877,8 @@ function App() {
                                 comparing={compareIds.includes(entry._id)}
                                 compareLimitReached={compareIds.length >= 2}
                                 terms={terms}
-                                onSelect={() => setSelectedId(entry._id)}
+                                maxVisibleTime={maxVisibleTime}
+                                onSelect={() => selectRequest(entry._id)}
                                 onToggleCompare={() => {
                                   setCompareIds((current) =>
                                     current.includes(entry._id)
@@ -1764,7 +2072,7 @@ function Payload({ title, value }) {
   const [showFormatted, setShowFormatted] = useState(true);
   const rawText = asText(value);
   const formattedText = formatPayload(value);
-  const isJson = formattedText !== rawText && ["{", "["].includes(rawText.trim()[0]);
+  const isJson = isJsonPayload(rawText);
   const text = isJson && showFormatted ? formattedText : rawText;
   const handleCopy = async () => {
     try {
@@ -1840,13 +2148,12 @@ function DiffPayload({ title, value, otherValue, side, copyAdditional, copyAddit
   const syncingScrollRef = useRef(false);
   const rawText = asText(value);
   const formattedText = formatPayload(value);
-  const isJson = formattedText !== rawText && ["{", "["].includes(rawText.trim()[0]);
+  const isJson = isJsonPayload(rawText);
   const text = isJson && showFormatted ? formattedText : rawText;
 
   const otherRawText = asText(otherValue);
   const otherFormattedText = formatPayload(otherValue);
-  const otherIsJson = otherFormattedText !== otherRawText &&
-    ["{", "["].includes(otherRawText.trim()[0]);
+  const otherIsJson = isJsonPayload(otherRawText);
   const otherText = isJson && otherIsJson && showFormatted ? otherFormattedText : otherRawText;
   const comparisonText = ignoreKeyOrder || ignoreArrayOrder
     ? normalizeJsonForDiff(text, ignoreKeyOrder, ignoreArrayOrder)

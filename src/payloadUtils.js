@@ -14,6 +14,17 @@ const formatPayload = (value) => {
   }
 };
 
+const isJsonPayload = (value) => {
+  const text = asText(value).trim();
+  if (!text || !["{", "["].includes(text[0])) return false;
+  try {
+    const parsed = JSON.parse(text);
+    return parsed !== null && typeof parsed === "object";
+  } catch {
+    return false;
+  }
+};
+
 const getRequestBody = (entry) => {
   const postData = entry?.request?.postData;
   if (postData?.text) return postData.text;
@@ -219,6 +230,7 @@ const summarizeJsonDifferences = (leftValue, rightValue) => {
 module.exports = {
   asText,
   formatPayload,
+  isJsonPayload,
   getRequestBody,
   getLineDiff,
   getCharacterDiff,

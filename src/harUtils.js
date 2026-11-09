@@ -67,36 +67,162 @@ const hasFailureIndicator = (entry, terms = []) =>
 const isFailedRequest = (entry, terms = []) =>
   entry._status >= 400 || entry._status === 0 || hasFailureIndicator(entry, terms);
 
-const normalizeEndpointPath = (pathname) => pathname
+const normalizeEndpointPath = (pathname, ignoreIds = true) => pathname
   .split("/")
   .map((segment) => {
+    if (!ignoreIds) return segment;
     if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(segment)) return "{uuid}";
     if (/^\d+$/.test(segment) || /^[0-9a-f]{24}$/i.test(segment)) return "{id}";
     return segment;
   })
   .join("/");
 
-const getEndpointKey = (entry) => {
+const getUrlHostnameCounts = (entries) => {
+  const counts = {};
+  entries.forEach((entry) => {
+    try {
+      const hostname = new URL(entry.request?.url || entry._url || "").hostname;
+      if (hostname) counts[hostname] = (counts[hostname] || 0) + 1;
+    } catch {
+      counts["(invalid URL)"] = (counts["(invalid URL)"] || 0) + 1;
+    }
+  });
+  return Object.entries(counts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+};
+
+const getHarWarnings = (entries) => {
+  const warnings = [];
+  entries.forEach((entry, index) => {
+    if (!entry.request?.url && !entry._url) warnings.push({ type: "missing-url", index, message: "Request URL is missing." });
+    if (!entry.response) warnings.push({ type: "missing-response", index, message: "Response data is missing." });
+    else if (entry.response.status === 0) warnings.push({ type: "failed-request", index, message: "Request ended before an HTTP response was received." });
+    else if (entry.response.content?.size < 0) warnings.push({ type: "truncated-content", index, message: "Response size is marked as truncated." });
+    else if (entry.response.content?.text === "" && (entry.response.content?.size || 0) > 0) {
+      warnings.push({ type: "missing-body", index, message: "Response body size is present, but body text is missing." });
+    }
+    if (entry.response?.redirectURL) warnings.push({ type: "redirect", index, message: `Redirects to ${entry.response.redirectURL}` });
+  });
+  return warnings;
+};
+
+const getPerformanceSummary = (entries) => {
+  const timings = entries.map((entry) => ({
+    url: entry._url || entry.request?.url || "",
+    time: Number(entry._time || 0),
+    size: Number(entry.response?.content?.size || entry.response?.bodySize || 0),
+  }));
+  return {
+    requestCount: entries.length,
+    totalDuration: timings.reduce((sum, item) => sum + item.time, 0),
+    totalSize: timings.reduce((sum, item) => sum + item.size, 0),
+    slowest: [...timings].sort((a, b) => b.time - a.time).slice(0, 5),
+  };
+};
+
+const getDuplicateEndpoints = (entries, options = {}) => {
+  const groups = {};
+  entries.forEach((entry) => {
+    const key = getEndpointKey(entry, options);
+    (groups[key] ||= []).push(entry);
+  });
+  return Object.entries(groups).filter(([, group]) => group.length > 1).sort((a, b) => b[1].length - a[1].length);
+};
+
+const redactSensitiveData = (value) => typeof value === "string"
+  ? value
+    .replace(/(authorization\s*[:=]\s*)[^\s,]+/gi, "$1[REDACTED]")
+    .replace(/((?:password|token|api[_-]?key|cookie)\s*[:=]\s*)[^\s,;&]+/gi, "$1[REDACTED]")
+  : value;
+
+const getEndpointKey = (entry, options = {}) => {
   try {
     const url = new URL(entry.request?.url || entry._url || "");
     const method = String(entry.request?.method || entry._method || "GET").toUpperCase();
-    const queryKeys = [...new Set([...new URLSearchParams(url.search).keys()].sort())];
-    return `${method} ${normalizeEndpointPath(url.pathname)}${queryKeys.length ? `?${queryKeys.join("&")}` : ""}`;
+    const query = options.ignoreQuery
+      ? []
+      : [...new Set([...new URLSearchParams(url.search).entries()]
+        .map(([key, value]) => options.ignoreQueryValues === false ? `${key}=${value}` : key)
+        .sort())];
+    return `${method} ${normalizeEndpointPath(url.pathname, options.ignoreIds !== false)}${query.length ? `?${query.join("&")}` : ""}`;
   } catch {
     const method = String(entry.request?.method || entry._method || "GET").toUpperCase();
     return `${method} ${String(entry.request?.url || entry._url || "").split("?")[0]}`;
   }
 };
 
-const getCommonEndpointKeys = (leftEntries, rightEntries) => {
-  const rightKeys = new Set(rightEntries.map(getEndpointKey));
-  return new Set(leftEntries.map(getEndpointKey).filter((key) => rightKeys.has(key)));
+const getCommonEndpointKeys = (leftEntries, rightEntries, options = {}) => {
+  const rightKeys = new Set(rightEntries.map((entry) => getEndpointKey(entry, options)));
+  return new Set(leftEntries.map((entry) => getEndpointKey(entry, options)).filter((key) => rightKeys.has(key)));
+};
+
+const entryFingerprint = (entry) => JSON.stringify({
+  status: entry._status,
+  requestBody: entry.request?.postData?.text || entry._requestBody || "",
+  responseBody: entry.response?.content?.text || "",
+  method: entry._method,
+});
+
+const getComparisonStatus = (entry, entries, side, otherEntries, options = {}) => {
+  const key = getEndpointKey(entry, options);
+  const peers = entries.filter((candidate) => getEndpointKey(candidate, options) === key);
+  const otherPeers = otherEntries.filter((candidate) => getEndpointKey(candidate, options) === key);
+  if (!otherPeers.length) return side === "left" ? "removed" : "added";
+  const index = peers.indexOf(entry);
+  const counterpart = otherPeers[Math.min(Math.max(index, 0), otherPeers.length - 1)];
+  return entryFingerprint(entry) === entryFingerprint(counterpart) ? "unchanged" : "changed";
+};
+
+const getPairedEntries = (entries, otherEntries, options = {}) => {
+  const used = new Set();
+  const pairs = [];
+  entries.forEach((entry) => {
+    const key = getEndpointKey(entry, options);
+    const counterpart = otherEntries.find((candidate, index) =>
+      !used.has(index) && getEndpointKey(candidate, options) === key,
+    );
+    if (!counterpart) return;
+    const counterpartIndex = otherEntries.indexOf(counterpart);
+    used.add(counterpartIndex);
+    pairs.push([entry, counterpart]);
+  });
+  return pairs;
 };
 
 async function parseHar(raw, onProgress = () => {}) {
-  const har = typeof raw === "string" ? JSON.parse(raw) : raw;
+  let har;
+  try {
+    har = typeof raw === "string" ? JSON.parse(raw) : raw;
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      throw new Error(`Invalid HAR JSON: ${error.message}`);
+    }
+    throw error;
+  }
+  if (!har || typeof har !== "object" || Array.isArray(har)) {
+    throw new Error("Invalid HAR file: expected a JSON object.");
+  }
+  if (!har.log || typeof har.log !== "object" || Array.isArray(har.log)) {
+    throw new Error("Invalid HAR file: the log object was not found.");
+  }
   const entries = har?.log?.entries;
   if (!Array.isArray(entries)) throw new Error("This file does not look like a valid HAR: log.entries was not found.");
+  const invalidEntryIndex = entries.findIndex((entry) =>
+    !entry || typeof entry !== "object" || Array.isArray(entry),
+  );
+  if (invalidEntryIndex !== -1) {
+    throw new Error(`Invalid HAR file: log.entries[${invalidEntryIndex}] must be an object.`);
+  }
+  entries.forEach((entry, index) => {
+    ["request", "response"].forEach((section) => {
+      const value = entry[section];
+      if (value != null && (typeof value !== "object" || Array.isArray(value))) {
+        throw new Error(`Invalid HAR file: log.entries[${index}].${section} must be an object.`);
+      }
+      if (value?.headers != null && !Array.isArray(value.headers)) {
+        throw new Error(`Invalid HAR file: log.entries[${index}].${section}.headers must be an array.`);
+      }
+    });
+  });
 
   const parsedEntries = [];
   for (let index = 0; index < entries.length; index += 500) {
@@ -133,5 +259,12 @@ module.exports = {
   normalizeEndpointPath,
   getEndpointKey,
   getCommonEndpointKeys,
+  getComparisonStatus,
+  getPairedEntries,
+  getUrlHostnameCounts,
+  getHarWarnings,
+  getPerformanceSummary,
+  getDuplicateEndpoints,
+  redactSensitiveData,
   parseHar,
 };
